@@ -1,6 +1,6 @@
 // ============================================
-// RAILWAY GATEWAY - FULL COMPLETE + EMBEDDED UDP RELAY + XUDP NATIVE
-// UI Cyberpunk + VLESS/Trojan Generator + WebSocket + UDP + XUDP
+// RAILWAY GATEWAY - FULL COMPLETE + EMBEDDED UDP RELAY
+// UI Cyberpunk + VLESS/Trojan Generator + WebSocket + UDP
 // Ready to Deploy - Node.js
 // Domain AUTO DETECT via JavaScript (browser-side)
 // ============================================
@@ -346,7 +346,7 @@ class GatewayServer {
               </label>
               <label class="flex-1 flex items-center gap-2 bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 cursor-pointer hover:border-emerald-500/50 transition">
                 <input type="radio" name="netMode" value="xudp" class="accent-emerald-500">
-                <span class="text-xs text-slate-300">XUDP (UDP over WS)</span>
+                <span class="text-xs text-slate-300">UDP Enabled</span>
               </label>
             </div>
           </div>
@@ -357,7 +357,7 @@ class GatewayServer {
               <select id="pathSelect" 
                       class="bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono focus:border-blue-500 focus:outline-none transition">
                 <option value="/ALL">🌍 /ALL (Rotate Global)</option>
-                <option value="/xudp">🛰️ /xudp (XUDP Native)</option>
+                <option value="/xudp">🛰️ /xudp (UDP Relay)</option>
                 <option value="/ID">🇮🇩 /ID (Indonesia)</option>
                 <option value="/SG">🇸🇬 /SG (Singapore)</option>
                 <option value="/JP">🇯🇵 /JP (Japan)</option>
@@ -456,7 +456,7 @@ class GatewayServer {
 
           <div class="bg-[#10121d] border border-slate-900/60 p-4 rounded-lg flex flex-col md:flex-row justify-between items-start md:items-center gap-3 hover:bg-[#121524] transition">
             <div>
-              <span class="text-xs bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded font-bold border border-emerald-500/20">XUDP NATIVE (v2rayNG/Xray)</span>
+              <span class="text-xs bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded font-bold border border-emerald-500/20">UDP RELAY (ALIAS /ALL)</span>
               <p class="text-sm font-semibold text-slate-200 mt-2"><span class="ws-domain">${protocolWs}</span>://<span class="ws-host">${currentHost}</span>/xudp</p>
             </div>
             <button onclick="copyDynamic('xudp')" class="text-xs bg-[#171a29] border border-slate-800 text-slate-400 hover:text-white hover:border-emerald-500 px-3 py-1.5 rounded transition flex items-center gap-1.5 active:scale-95">
@@ -731,17 +731,18 @@ class GatewayServer {
         let path = document.getElementById('pathInput').value.trim() || '/ALL';
         const netModeEl = document.querySelector('input[name="netMode"]:checked');
         const netMode = netModeEl ? netModeEl.value : 'tcp';
-        const isXudp = netMode === 'xudp';
-        if (isXudp && (path === '/ALL' || path === '')) path = '/xudp';
+        const isUdp = netMode === 'xudp';
+        if (isUdp && (path === '/ALL' || path === '')) path = '/xudp';
         const sni = document.getElementById('sniInput').value.trim() || 'business.whatsapp.com';
         const remark = document.getElementById('remarkInput').value.trim() || 'KOPI KAPAL';
         const encodedPath = encodeURIComponent(path);
         const encodedRemark = encodeURIComponent(remark);
 
+        // Relay ini bukan Xray penuh, jadi TIDAK pakai packetEncoding=xudp.
+        // Client kirim UDP raw di dalam WS (UDP-over-TCP standar).
         let vlessQuery = 'encryption=none&security=tls&sni=' + sni +
                          '&fp=randomized&type=ws&host=' + host +
                          '&path=' + encodedPath;
-        if (isXudp) vlessQuery += '&packetEncoding=xudp';
         const vlessUrl = 'vless://' + uuid + '@' + host + ':' + port + '?' + vlessQuery + '#' + encodedRemark;
 
         const trojanPass = generateTrojanPass();
@@ -762,7 +763,6 @@ class GatewayServer {
           '  network: ws\\n' +
           '  tls: true\\n' +
           '  udp: true\\n' +
-          (isXudp ? '  packet-encoding: xudp\\n' : '') +
           '  sni: "' + sni + '"\\n' +
           '  client-fingerprint: randomized\\n' +
           '  ws-opts:\\n' +
@@ -918,7 +918,9 @@ class GatewayServer {
   async handleWebSocketConnection(ws, request) {
     try {
       const parsedUrl = url.parse(request.url, true);
-      const path = parsedUrl.pathname;
+      let path = parsedUrl.pathname;
+      // /xudp = alias /ALL untuk client v2ray biasa yang kirim UDP raw di WS
+      if (path === '/xudp' || path === '/XUDP') path = '/ALL';
       console.log(`WebSocket request path: ${path}`);
 
       const proxyListMatch = path.match(/^\/PROXYLIST\/([A-Z]{2}(,[A-Z]{2})*)$/i);
@@ -1345,19 +1347,13 @@ class GatewayServer {
       let pathname = '/';
       try { pathname = url.parse(req.url).pathname || '/'; } catch (_) {}
 
-      // /xudp → XUDP native (v2rayNG/Xray dengan packetEncoding=xudp)
-      if (pathname === '/xudp' || pathname === '/XUDP') {
-        relayHandler.handleUpgradeDirectXudp(req, socket, head);
-        return;
-      }
-
       // /xudp-native → VLRLY004 relay (khusus CF Worker)
       if (pathname === RELAY_WS_PATH) {
         relayHandler.handleUpgrade(req, socket, head);
         return;
       }
 
-      // Path lain → gateway Trojan/VMess/SS biasa
+      // Path lain (termasuk /xudp) → gateway Trojan/VMess/SS biasa
       this.wss.handleUpgrade(req, socket, head, (ws) => {
         this.wss.emit('connection', ws, req);
       });
@@ -1380,7 +1376,7 @@ class GatewayServer {
       console.log(`✅ Railway Gateway running on port ${port}`);
       console.log(`🌐 http://localhost:${port}`);
       console.log(`🔌 ws://localhost:${port}`);
-      console.log(`🛰️  XUDP native path: /xudp`);
+      console.log(`🛰️  UDP relay (/xudp alias /ALL)`);
       console.log(`🛰️  VLRLY004 path: ${RELAY_WS_PATH}`);
     });
 
@@ -1394,11 +1390,7 @@ class GatewayServer {
 }
 
 // =====================================================================
-// =============== EMBEDDED UDP / XUDP WEBSOCKET RELAY =================
-// =====================================================================
-// Dua mode:
-//   1. /xudp          → XUDP native (v2rayNG/Xray). Tanpa VLRLY004 magic.
-//   2. /xudp-native   → VLRLY004 (khusus CF Worker / custom client).
+// =============== EMBEDDED VLRLY004 WEBSOCKET RELAY ===================
 // =====================================================================
 
 const RELAY_WS_PATH = process.env.RELAY_WS_PATH || '/xudp-native';
@@ -2397,7 +2389,6 @@ function createRelayUpgradeHandler() {
     const xm = new XUDPManager(RELAY_CFG.XUDP_GRACE_MS);
     let active = 0;
     return {
-        // Mode 1: VLRLY004 (CF Worker / custom client)
         handleUpgrade(req, raw, head) {
             STATS.totalHandshakes++;
             if (active >= RELAY_CFG.MAX_CONNECTIONS) {
@@ -2430,57 +2421,6 @@ function createRelayUpgradeHandler() {
             });
             socket.feedHead(initial);
         },
-
-        // Mode 2: XUDP native (v2rayNG/Xray) — tanpa VLRLY004 magic
-        handleUpgradeDirectXudp(req, raw, head) {
-            const accepted = acceptWebSocketUpgrade(req, raw, head, {
-                wsPath: '/xudp',
-                maxWsMessageBytes: RELAY_CFG.MAX_WS_MESSAGE_BYTES,
-            });
-            if (!accepted) return;
-            const { socket, head: initial } = accepted;
-            active++;
-            STATS.activeClients = active;
-            let counted = true;
-            socket.once('close', () => {
-                if (counted) {
-                    counted = false;
-                    active--;
-                    STATS.activeClients = active;
-                    addLog(`[XUDP] Client terputus. Sisa klien aktif: ${active}`);
-                }
-            });
-
-            const reader = new AsyncByteReader(socket);
-            const mux = new MuxConnection(socket, reader, {
-                handshakeTimeout: RELAY_CFG.HANDSHAKE_TIMEOUT_MS,
-                idleTimeout: RELAY_CFG.IDLE_TIMEOUT_MS,
-            }, xm);
-
-            const loop = async () => {
-                for (;;) {
-                    const frame = await readMuxFrame(reader);
-                    await mux.handleFrame(frame);
-                }
-            };
-
-            socket.setNoDelay(true);
-            socket.setTimeout(RELAY_CFG.IDLE_TIMEOUT_MS > 0 ? RELAY_CFG.IDLE_TIMEOUT_MS : 0,
-                () => socket.destroy(new Error('idle timeout')));
-
-            addLog(`[XUDP] Client connected: ${socket.remoteAddress || '?'}`);
-            loop().catch((err) => {
-                if (!isNormalClose(err)) {
-                    addLog(`[XUDP] Error: ${err.message || err}`);
-                }
-            }).finally(() => {
-                mux.closeAll();
-                socket.destroy();
-            });
-
-            socket.feedHead(initial);
-        },
-
         close() { xm.close(); },
         get stats() { return STATS; },
     };
