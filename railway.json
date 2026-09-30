@@ -1,0 +1,25 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "NIXPACKS",
+    "buildCommand": "npm install",
+    "watchPatterns": [
+      "server.js",
+      "package.json"
+    ]
+  },
+  "deploy": {
+    "startCommand": "node server.js",
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 10,
+    "healthcheckInterval": 30,
+    "restartPolicyType": "ON_FAILURE",
+    "numReplicas": 1,
+    "sleepApplication": false
+  },
+  "variables": {
+    "NODE_ENV": "production",
+    "PORT": "3000",
+    "NODE_OPTIONS": "--max-old-space-size=512"
+  }
+}
