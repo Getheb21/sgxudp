@@ -1,5 +1,5 @@
 // ============================================
-// RAILWAY GATEWAY - FULL COMPLETE + EMBEDDED UDP RELAY + XUDP
+// RAILWAY GATEWAY - FULL COMPLETE + EMBEDDED UDP RELAY + XUDP NATIVE
 // UI Cyberpunk + VLESS/Trojan Generator + WebSocket + UDP + XUDP
 // Ready to Deploy - Node.js
 // Domain AUTO DETECT via JavaScript (browser-side)
@@ -67,6 +67,17 @@ class GatewayServer {
     this.totalRX = 0;
     this.totalTX = 0;
     this._relayHandler = null;
+    this.udpStats = {
+      outPackets: 0,
+      outBytes: 0,
+      inPackets: 0,
+      inBytes: 0,
+      lastError: null,
+      lastTarget: null,
+      lastActivity: null,
+      wsConnections: 0,
+      activeUdpSockets: 0,
+    };
   }
 
   // ==================== HTTP HANDLERS ====================
@@ -144,14 +155,23 @@ class GatewayServer {
         return;
       }
 
-      // ==== tambahan: expose statistik relay UDP lewat REST ====
+      // ==== statistik relay UDP & XUDP ====
       if (parsedUrl.pathname === '/api/relay-stats') {
-        const stats = this._relayHandler ? this._relayHandler.stats : null;
+        const customStats = this._relayHandler ? this._relayHandler.stats : null;
+        const payload = {
+          gateway: {
+            ...this.udpStats,
+            activeUdpConnections: this.activeUDPConnections.size,
+            totalRX: this.totalRX,
+            totalTX: this.totalTX,
+          },
+          customRelay: customStats,
+        };
         res.writeHead(200, {
           'Content-Type': 'application/json',
           ...this.CORS_HEADER_OPTIONS
         });
-        res.end(JSON.stringify(stats || { error: 'relay not initialized' }, null, 2));
+        res.end(JSON.stringify(payload, null, 2));
         return;
       }
     } catch (error) {
@@ -337,7 +357,7 @@ class GatewayServer {
               <select id="pathSelect" 
                       class="bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono focus:border-blue-500 focus:outline-none transition">
                 <option value="/ALL">🌍 /ALL (Rotate Global)</option>
-                <option value="/xudp">🛰️ /xudp (UDP Relay)</option>
+                <option value="/xudp">🛰️ /xudp (XUDP Native)</option>
                 <option value="/ID">🇮🇩 /ID (Indonesia)</option>
                 <option value="/SG">🇸🇬 /SG (Singapore)</option>
                 <option value="/JP">🇯🇵 /JP (Japan)</option>
@@ -436,7 +456,7 @@ class GatewayServer {
 
           <div class="bg-[#10121d] border border-slate-900/60 p-4 rounded-lg flex flex-col md:flex-row justify-between items-start md:items-center gap-3 hover:bg-[#121524] transition">
             <div>
-              <span class="text-xs bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded font-bold border border-emerald-500/20">UDP / XUDP RELAY</span>
+              <span class="text-xs bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded font-bold border border-emerald-500/20">XUDP NATIVE (v2rayNG/Xray)</span>
               <p class="text-sm font-semibold text-slate-200 mt-2"><span class="ws-domain">${protocolWs}</span>://<span class="ws-host">${currentHost}</span>/xudp</p>
             </div>
             <button onclick="copyDynamic('xudp')" class="text-xs bg-[#171a29] border border-slate-800 text-slate-400 hover:text-white hover:border-emerald-500 px-3 py-1.5 rounded transition flex items-center gap-1.5 active:scale-95">
@@ -541,7 +561,7 @@ class GatewayServer {
           <div class="bg-[#10121d] border border-slate-900/60 p-4 rounded-lg flex items-center justify-between hover:bg-[#121524] transition">
             <div>
               <span class="text-[10px] bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded font-bold border border-emerald-500/20 mr-2">GET</span>
-              <span class="text-xs text-slate-500 font-medium">UDP RELAY LIVE STATS</span>
+              <span class="text-xs text-slate-500 font-medium">UDP / XUDP LIVE STATS</span>
               <p class="text-sm font-semibold text-slate-200 mt-2"><span class="http-domain">${protocolHttp}</span>://<span class="http-host">${currentHost}</span>/api/relay-stats</p>
             </div>
             <button onclick="testDynamic('api/relay-stats')" class="text-xs bg-blue-600/10 border border-blue-500/20 text-blue-400 hover:bg-blue-600 hover:text-white px-3 py-1.5 rounded transition">
@@ -605,7 +625,6 @@ class GatewayServer {
     const wsProtocol = isSecure ? 'wss' : 'ws';
     const httpProtocol = isSecure ? 'https' : 'http';
     
-    // Update semua span domain di halaman
     function updateAllDomains() {
       const hostInput = document.getElementById('hostInput');
       if (hostInput && currentDomain !== hostInput.value) {
@@ -899,10 +918,7 @@ class GatewayServer {
   async handleWebSocketConnection(ws, request) {
     try {
       const parsedUrl = url.parse(request.url, true);
-      let path = parsedUrl.pathname;
-      // /xudp = alias /ALL untuk client v2ray yang pakai UDP-over-WS.
-      // (protocol VLRLY004 custom tetap di path RELAY_WS_PATH)
-      if (path === '/xudp' || path === '/XUDP') path = '/ALL';
+      const path = parsedUrl.pathname;
       console.log(`WebSocket request path: ${path}`);
 
       const proxyListMatch = path.match(/^\/PROXYLIST\/([A-Z]{2}(,[A-Z]{2})*)$/i);
@@ -1059,6 +1075,8 @@ class GatewayServer {
     const log = (info, event) => console.log(`[${addressLog}:${portLog}] ${info}`, event || "");
     let remoteSocketWrapper = { value: null };
 
+    this.udpStats.wsConnections++;
+
     ws.on('message', async (message) => {
       try {
         const chunk = Buffer.from(message);
@@ -1091,6 +1109,7 @@ class GatewayServer {
     ws.on('close', () => {
       if (remoteSocketWrapper.value) remoteSocketWrapper.value.end();
       this.cleanupUDPConnections(ws);
+      this.udpStats.wsConnections = Math.max(0, this.udpStats.wsConnections - 1);
       log('WebSocket closed');
     });
 
@@ -1136,31 +1155,101 @@ class GatewayServer {
   }
 
   async handleUDPOutbound(targetAddress, targetPort, dataChunk, webSocket, responseHeader, log) {
-    return new Promise((resolve) => {
-      try {
-        let header = responseHeader;
-        const key = `${targetAddress}:${targetPort}:${Date.now()}`;
-        const sock = dgram.createSocket('udp4');
-        this.activeUDPConnections.set(key, { socket: sock, webSocket });
-        sock.on('error', (e) => { try{sock.close()}catch(_){} this.activeUDPConnections.delete(key); });
-        sock.send(dataChunk, targetPort, targetAddress, (e) => { if(e){ try{sock.close()}catch(_){} this.activeUDPConnections.delete(key); } });
-        sock.on('message', (msg) => {
-          this.totalRX += msg.length;
-          if (webSocket.readyState === WebSocket.OPEN) {
-            if (header) { 
-              const buf = Buffer.from(header);
-              this.totalTX += buf.length;
-              webSocket.send(Buffer.concat([buf, msg])); 
-              header = null; 
-            }
-            else webSocket.send(msg);
+    try {
+      this.udpStats.lastTarget = `${targetAddress}:${targetPort}`;
+      this.udpStats.lastActivity = new Date().toISOString();
+
+      let header = responseHeader;
+      let resolvedAddress = targetAddress;
+      let family = 4;
+
+      if (net.isIPv4(targetAddress)) {
+        resolvedAddress = targetAddress;
+        family = 4;
+      } else if (net.isIPv6(targetAddress)) {
+        resolvedAddress = targetAddress;
+        family = 6;
+      } else {
+        try {
+          const rec = await dns.lookup(targetAddress, { family: 4 });
+          resolvedAddress = rec.address;
+          family = 4;
+          log(`DNS ${targetAddress} -> ${resolvedAddress}`);
+        } catch (e) {
+          try {
+            const rec6 = await dns.lookup(targetAddress, { family: 6 });
+            resolvedAddress = rec6.address;
+            family = 6;
+            log(`DNS ${targetAddress} -> ${resolvedAddress} (IPv6)`);
+          } catch (e2) {
+            this.udpStats.lastError = `DNS FAIL ${targetAddress}: ${e2.message}`;
+            log(this.udpStats.lastError);
+            return;
           }
-        });
-        sock.on('close', () => this.activeUDPConnections.delete(key));
-        let t = setTimeout(() => { try{sock.close()}catch(_){} this.activeUDPConnections.delete(key); }, 30000);
-        sock.on('message', () => { clearTimeout(t); t = setTimeout(() => { try{sock.close()}catch(_){} this.activeUDPConnections.delete(key); }, 30000); });
-      } catch(e) { console.error(`UDP error: ${e.message}`); }
-    });
+        }
+      }
+
+      const key = `${targetAddress}:${targetPort}:${Date.now()}`;
+      const sock = dgram.createSocket(family === 6 ? 'udp6' : 'udp4');
+      this.activeUDPConnections.set(key, { socket: sock, webSocket });
+      this.udpStats.activeUdpSockets = this.activeUDPConnections.size;
+
+      const cleanup = () => {
+        try { sock.close(); } catch(_) {}
+        this.activeUDPConnections.delete(key);
+        this.udpStats.activeUdpSockets = this.activeUDPConnections.size;
+      };
+
+      sock.on('error', (e) => {
+        this.udpStats.lastError = `SOCK ${e.message}`;
+        log(`UDP socket error: ${e.message}`);
+        cleanup();
+      });
+
+      sock.send(dataChunk, targetPort, resolvedAddress, (e) => {
+        if (e) {
+          this.udpStats.lastError = `SEND ${e.message}`;
+          log(`UDP send error -> ${e.message}`);
+          cleanup();
+        } else {
+          this.udpStats.outPackets++;
+          this.udpStats.outBytes += dataChunk.length;
+          log(`UDP sent ${dataChunk.length}B to ${resolvedAddress}:${targetPort}`);
+        }
+      });
+
+      sock.on('message', (msg, rinfo) => {
+        this.udpStats.inPackets++;
+        this.udpStats.inBytes += msg.length;
+        this.udpStats.lastActivity = new Date().toISOString();
+        this.totalRX += msg.length;
+        log(`UDP got ${msg.length}B from ${rinfo.address}:${rinfo.port}`);
+        if (webSocket.readyState === WebSocket.OPEN) {
+          if (header) {
+            const buf = Buffer.from(header);
+            this.totalTX += buf.length;
+            webSocket.send(Buffer.concat([buf, msg]));
+            header = null;
+          } else {
+            webSocket.send(msg);
+          }
+        }
+      });
+
+      sock.on('close', () => {
+        this.activeUDPConnections.delete(key);
+        this.udpStats.activeUdpSockets = this.activeUDPConnections.size;
+      });
+
+      let t = setTimeout(cleanup, 30000);
+      sock.on('message', () => {
+        clearTimeout(t);
+        t = setTimeout(cleanup, 30000);
+      });
+    } catch (e) {
+      this.udpStats.lastError = e.message;
+      console.error(`UDP error: ${e.message}`);
+    }
   }
 
   cleanupUDPConnections(webSocket) {
@@ -1248,17 +1337,27 @@ class GatewayServer {
       this.handleWebSocketConnection(ws, req);
     });
 
-    // ==== Routing upgrade: /xudp-native → custom relay VLRLY004, sisanya → gateway ====
+    // ==== Routing upgrade ====
     const relayHandler = createRelayUpgradeHandler();
     this._relayHandler = relayHandler;
 
     server.on('upgrade', (req, socket, head) => {
       let pathname = '/';
       try { pathname = url.parse(req.url).pathname || '/'; } catch (_) {}
+
+      // /xudp → XUDP native (v2rayNG/Xray dengan packetEncoding=xudp)
+      if (pathname === '/xudp' || pathname === '/XUDP') {
+        relayHandler.handleUpgradeDirectXudp(req, socket, head);
+        return;
+      }
+
+      // /xudp-native → VLRLY004 relay (khusus CF Worker)
       if (pathname === RELAY_WS_PATH) {
         relayHandler.handleUpgrade(req, socket, head);
         return;
       }
+
+      // Path lain → gateway Trojan/VMess/SS biasa
       this.wss.handleUpgrade(req, socket, head, (ws) => {
         this.wss.emit('connection', ws, req);
       });
@@ -1281,7 +1380,8 @@ class GatewayServer {
       console.log(`✅ Railway Gateway running on port ${port}`);
       console.log(`🌐 http://localhost:${port}`);
       console.log(`🔌 ws://localhost:${port}`);
-      console.log(`🛰️  UDP/XUDP relay path: wss://<host>${RELAY_WS_PATH}`);
+      console.log(`🛰️  XUDP native path: /xudp`);
+      console.log(`🛰️  VLRLY004 path: ${RELAY_WS_PATH}`);
     });
 
     this.httpServer = server;
@@ -1296,9 +1396,9 @@ class GatewayServer {
 // =====================================================================
 // =============== EMBEDDED UDP / XUDP WEBSOCKET RELAY =================
 // =====================================================================
-// Diambil dari index.js — dijalankan di HTTP server yang sama dengan
-// gateway. Aktif hanya pada path RELAY_WS_PATH (default "/xudp-native").
-// Client TCP Trojan/VMess/SS di path lain tetap utuh.
+// Dua mode:
+//   1. /xudp          → XUDP native (v2rayNG/Xray). Tanpa VLRLY004 magic.
+//   2. /xudp-native   → VLRLY004 (khusus CF Worker / custom client).
 // =====================================================================
 
 const RELAY_WS_PATH = process.env.RELAY_WS_PATH || '/xudp-native';
@@ -2297,6 +2397,7 @@ function createRelayUpgradeHandler() {
     const xm = new XUDPManager(RELAY_CFG.XUDP_GRACE_MS);
     let active = 0;
     return {
+        // Mode 1: VLRLY004 (CF Worker / custom client)
         handleUpgrade(req, raw, head) {
             STATS.totalHandshakes++;
             if (active >= RELAY_CFG.MAX_CONNECTIONS) {
@@ -2329,6 +2430,57 @@ function createRelayUpgradeHandler() {
             });
             socket.feedHead(initial);
         },
+
+        // Mode 2: XUDP native (v2rayNG/Xray) — tanpa VLRLY004 magic
+        handleUpgradeDirectXudp(req, raw, head) {
+            const accepted = acceptWebSocketUpgrade(req, raw, head, {
+                wsPath: '/xudp',
+                maxWsMessageBytes: RELAY_CFG.MAX_WS_MESSAGE_BYTES,
+            });
+            if (!accepted) return;
+            const { socket, head: initial } = accepted;
+            active++;
+            STATS.activeClients = active;
+            let counted = true;
+            socket.once('close', () => {
+                if (counted) {
+                    counted = false;
+                    active--;
+                    STATS.activeClients = active;
+                    addLog(`[XUDP] Client terputus. Sisa klien aktif: ${active}`);
+                }
+            });
+
+            const reader = new AsyncByteReader(socket);
+            const mux = new MuxConnection(socket, reader, {
+                handshakeTimeout: RELAY_CFG.HANDSHAKE_TIMEOUT_MS,
+                idleTimeout: RELAY_CFG.IDLE_TIMEOUT_MS,
+            }, xm);
+
+            const loop = async () => {
+                for (;;) {
+                    const frame = await readMuxFrame(reader);
+                    await mux.handleFrame(frame);
+                }
+            };
+
+            socket.setNoDelay(true);
+            socket.setTimeout(RELAY_CFG.IDLE_TIMEOUT_MS > 0 ? RELAY_CFG.IDLE_TIMEOUT_MS : 0,
+                () => socket.destroy(new Error('idle timeout')));
+
+            addLog(`[XUDP] Client connected: ${socket.remoteAddress || '?'}`);
+            loop().catch((err) => {
+                if (!isNormalClose(err)) {
+                    addLog(`[XUDP] Error: ${err.message || err}`);
+                }
+            }).finally(() => {
+                mux.closeAll();
+                socket.destroy();
+            });
+
+            socket.feedHead(initial);
+        },
+
         close() { xm.close(); },
         get stats() { return STATS; },
     };
