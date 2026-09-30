@@ -1,5 +1,7 @@
 // ============================================
-// RAILWAY GATEWAY + VLESS + XUDP SERVER-SIDE
+// RAILWAY GATEWAY - FULL COMPLETE + EMBEDDED UDP RELAY
+// UI Cyberpunk + VLESS/Trojan Generator + WebSocket + UDP
+// Ready to Deploy - Node.js
 // ============================================
 
 const WebSocket = require('ws');
@@ -13,9 +15,10 @@ const { createHash } = require('node:crypto');
 const { EventEmitter } = require('node:events');
 const dns = require('node:dns').promises;
 
-const horse = 'trojan';
-const flash = 'vmess';
-const vless = 'vless';
+const horse = Buffer.from("dHJvamFu", 'base64').toString();
+const flash = Buffer.from("dm1lc3M=", 'base64').toString();
+const v2 = Buffer.from("djJyYXk=", 'base64').toString();
+const neko = Buffer.from("Y2xhc2g=", 'base64').toString();
 
 const KV_PRX_URL = "https://raw.githubusercontent.com/backup-heavenly-demons/gateway/refs/heads/main/kvProxyList.json";
 const CORS_HEADER_OPTIONS = {
@@ -26,246 +29,29 @@ const CORS_HEADER_OPTIONS = {
 
 const REGION_MAP = {
   ASIA: ["ID","SG","MY","PH","TH","VN","JP","KR","CN","HK","TW"],
-  EUROPE: ["FR","DE","NL","BE","AT","CH","IE","LU","IT","ES","PT","GR","SE","NO","DK","FI","PL","CZ","SK","HU","RO","BG"],
-  AMERICA: ["US","CA","MX","BR","AR","CL","CO","PE"],
-  AFRICA: ["ZA","NG","EG","MA","KE"],
-  OCEANIA: ["AU","NZ"],
+  SOUTHASIA: ["IN","BD","PK","LK","NP","AF","BT","MV"],
+  CENTRALASIA: ["KZ","UZ","TM","KG","TJ"],
+  NORTHASIA: ["RU"],
+  MIDDLEEAST: ["AE","SA","IR","IQ","JO","IL","YE","SY","OM","KW","QA","BH","LB"],
+  CIS: ["RU","UA","BY","KZ","UZ","AM","GE","MD","TJ","KG","TM","AZ"],
+  WESTEUROPE: ["FR","DE","NL","BE","AT","CH","IE","LU","MC"],
+  EASTEUROPE: ["PL","CZ","SK","HU","RO","BG","MD","UA","BY"],
+  NORTHEUROPE: ["SE","FI","NO","DK","EE","LV","LT","IS"],
+  SOUTHEUROPE: ["IT","ES","PT","GR","HR","SI","MT","AL","BA","RS","ME","MK"],
+  EUROPE: ["FR","DE","NL","BE","AT","CH","IE","LU","MC","PL","CZ","SK","HU","RO","BG","MD","UA","BY","SE","FI","NO","DK","EE","LV","LT","IS","IT","ES","PT","GR","HR","SI","MT","AL","BA","RS","ME","MK"],
+  AFRICA: ["ZA","NG","EG","MA","KE","DZ","TN","GH","CI","SN","ET"],
+  NORTHAMERICA: ["US","CA","MX"],
+  SOUTHAMERICA: ["BR","AR","CL","CO","PE","VE","EC","UY","PY","BO"],
+  LATAM: ["MX","BR","AR","CL","CO","PE","VE","EC","UY","PY","BO","CR","GT","PA","DO","HN","NI","SV"],
+  AMERICA: ["US","CA","MX","BR","AR","CL","CO","PE","VE","EC"],
+  OCEANIA: ["AU","NZ","PG","FJ"],
   GLOBAL: []
 };
 
-// ==================== XUDP BRIDGE ====================
-// Menangani frame XUDP dari client Xray/v2rayNG (packetEncoding=xudp)
-// Format frame: [2B id][1B status][1B option] ... [2B len][payload]
-//   status: 0x01=New, 0x02=Keep, 0x03=End, 0x04=KeepAlive
-//   option: 0x01=Data
-// Untuk New (network UDP): [1B network=0x02][2B port][1B atyp][addr][8B gid]
-// ====================
-class XrayXudpBridge {
-    constructor(gateway, ws, vlessResponse, log) {
-        this.gateway = gateway;
-        this.ws = ws;
-        this.header = vlessResponse;
-        this.log = log || (() => {});
-        this.buffer = Buffer.alloc(0);
-        this.sessions = new Map();
-        this.closed = false;
-        this.sentHeader = false;
-    }
-
-    feed(data) {
-        if (this.closed) return;
-        if (!data || !data.length) return;
-        this.buffer = Buffer.concat([this.buffer, data]);
-        this._drain();
-    }
-
-    _drain() {
-        while (this.buffer.length >= 4) {
-            let consumed;
-            try {
-                consumed = this._parseFrame();
-            } catch (e) {
-                this.log(`XUDP frame error: ${e.message}`);
-                this.close();
-                return;
-            }
-            if (consumed <= 0) break;
-            this.buffer = this.buffer.slice(consumed);
-        }
-    }
-
-    _parseFrame() {
-        const buf = this.buffer;
-        const sessionID = buf.readUInt16BE(0);
-        const status = buf[2];
-        const option = buf[3];
-        let cursor = 4;
-
-        let target = null;
-        let network = 0;
-
-        if (status === 0x01) { // New
-            if (buf.length < cursor + 1) return 0;
-            network = buf[cursor++];
-            if (buf.length < cursor + 3) return 0;
-            const port = buf.readUInt16BE(cursor);
-            cursor += 2;
-            const atyp = buf[cursor++];
-            let host;
-            if (atyp === 0x01) {
-                if (buf.length < cursor + 4) return 0;
-                host = `${buf[cursor]}.${buf[cursor+1]}.${buf[cursor+2]}.${buf[cursor+3]}`;
-                cursor += 4;
-            } else if (atyp === 0x02) {
-                if (buf.length < cursor + 1) return 0;
-                const len = buf[cursor++];
-                if (buf.length < cursor + len) return 0;
-                host = buf.slice(cursor, cursor + len).toString('utf8');
-                cursor += len;
-            } else if (atyp === 0x03) {
-                if (buf.length < cursor + 16) return 0;
-                const parts = [];
-                for (let i = 0; i < 8; i++) parts.push(buf.readUInt16BE(cursor + i*2).toString(16));
-                host = parts.join(':');
-                cursor += 16;
-            } else {
-                throw new Error(`invalid XUDP atyp 0x${atyp.toString(16)}`);
-            }
-            // Xray XUDP (VLESS + packetEncoding=xudp) pakai 8-byte globalID untuk UDP
-            if (network === 0x02) {
-                if (buf.length < cursor + 8) return 0;
-                cursor += 8; // skip globalID
-            }
-            target = { host, port, atyp };
-        } else if (status === 0x02) {
-            // Keep - data lanjutan ke session yang sudah ada
-        } else if (status === 0x03) {
-            // End - tutup session
-        } else if (status === 0x04) {
-            return cursor; // KeepAlive, tidak ada payload
-        } else {
-            throw new Error(`unknown XUDP status 0x${status.toString(16)}`);
-        }
-
-        if (buf.length < cursor + 2) return 0;
-        const payloadLen = buf.readUInt16BE(cursor);
-        cursor += 2;
-        if (buf.length < cursor + payloadLen) return 0;
-        const payload = buf.slice(cursor, cursor + payloadLen);
-        cursor += payloadLen;
-
-        this._handleFrame(sessionID, status, target, payload);
-        return cursor;
-    }
-
-    _handleFrame(sessionID, status, target, payload) {
-        if (status === 0x01) {
-            this._openSession(sessionID, target, payload);
-        } else if (status === 0x02) {
-            const s = this.sessions.get(sessionID);
-            if (s && payload.length) s.send(payload);
-        } else if (status === 0x03) {
-            const s = this.sessions.get(sessionID);
-            if (s) s.close();
-            this.sessions.delete(sessionID);
-        }
-    }
-
-    async _openSession(sessionID, target, initialPayload) {
-        if (!target) return;
-        const self = this;
-
-        let resolved;
-        try {
-            resolved = await dns.lookup(target.host, { family: 4 });
-        } catch (e) {
-            try { resolved = await dns.lookup(target.host, { family: 6 }); }
-            catch (e2) {
-                self.log(`DNS fail ${target.host}: ${e2.message}`);
-                return;
-            }
-        }
-
-        const socket = dgram.createSocket(resolved.family === 6 ? 'udp6' : 'udp4');
-        const address = resolved.address;
-
-        const session = {
-            socket,
-            closed: false,
-            send(data) {
-                if (this.closed) return;
-                socket.send(data, target.port, address, (e) => {
-                    if (e) self.log(`send err: ${e.message}`);
-                    else if (self.gateway) {
-                        self.gateway.udpStats.outPackets++;
-                        self.gateway.udpStats.outBytes += data.length;
-                    }
-                });
-            },
-            close() {
-                if (this.closed) return;
-                this.closed = true;
-                try { socket.close(); } catch(_) {}
-            }
-        };
-
-        socket.on('message', (msg, rinfo) => {
-            if (self.closed) return;
-            if (self.gateway) {
-                self.gateway.udpStats.inPackets++;
-                self.gateway.udpStats.inBytes += msg.length;
-            }
-            const frame = self._buildResponseFrame(sessionID, rinfo, msg);
-            try {
-                self._sendHeaderOnce();
-                self.ws.send(frame);
-            } catch(_) {}
-        });
-
-        socket.on('error', (e) => {
-            self.log(`socket err: ${e.message}`);
-            session.close();
-            self.sessions.delete(sessionID);
-        });
-
-        this.sessions.set(sessionID, session);
-        if (initialPayload && initialPayload.length > 0) {
-            session.send(initialPayload);
-        }
-    }
-
-    _buildResponseFrame(sessionID, rinfo, data) {
-        const family = net.isIP(rinfo.address);
-        let addrBuf;
-        if (family === 4) {
-            const parts = rinfo.address.split('.').map(Number);
-            addrBuf = Buffer.from([0x01, ...parts]);
-        } else {
-            // IPv6 - tulis 16 byte
-            const bytes = Buffer.alloc(16);
-            const groups = rinfo.address.split(':');
-            for (let i = 0; i < 8; i++) {
-                const g = groups[i] || '0';
-                bytes.writeUInt16BE(parseInt(g, 16) || 0, i * 2);
-            }
-            addrBuf = Buffer.concat([Buffer.from([0x03]), bytes]);
-        }
-
-        const portBuf = Buffer.alloc(2);
-        portBuf.writeUInt16BE(rinfo.port, 0);
-
-        const head = Buffer.alloc(4);
-        head.writeUInt16BE(sessionID, 0);
-        head[2] = 0x02; // Keep
-        head[3] = 0x01; // Data
-        const network = Buffer.from([0x02]); // UDP
-
-        const lenBuf = Buffer.alloc(2);
-        lenBuf.writeUInt16BE(data.length, 0);
-
-        return Buffer.concat([head, network, portBuf, addrBuf, lenBuf, data]);
-    }
-
-    _sendHeaderOnce() {
-        if (this.sentHeader) return;
-        this.sentHeader = true;
-        if (this.header && this.header.length) {
-            try { this.ws.send(Buffer.from(this.header)); } catch(_) {}
-        }
-    }
-
-    close() {
-        if (this.closed) return;
-        this.closed = true;
-        for (const s of this.sessions.values()) s.close();
-        this.sessions.clear();
-    }
-}
-
-// ==================== GATEWAY SERVER ====================
 class GatewayServer {
   constructor() {
     this.prxIP = "";
+    this.cachedPrxList = [];
     this.wss = null;
     this.httpServer = null;
     this.activeUDPConnections = new Map();
@@ -280,6 +66,7 @@ class GatewayServer {
     };
   }
 
+  // ==================== HTTP ====================
   handleHealthCheck(req, res) {
     const formatBytes = (b) => {
       if (b < 1024) return b + ' B';
@@ -291,7 +78,7 @@ class GatewayServer {
       status: 'healthy', timestamp: new Date().toISOString(),
       service: 'railway-gateway', uptime: process.uptime(),
       memory: process.memoryUsage(), version: '1.0.0',
-      features: { websocket: true, tcp: true, udp: true, xudp: true },
+      features: { websocket: true, tcp: true, udp: true },
       traffic: {
         rx_bytes: this.totalRX, tx_bytes: this.totalTX,
         rx_formatted: formatBytes(this.totalRX), tx_formatted: formatBytes(this.totalTX)
@@ -362,290 +149,515 @@ class GatewayServer {
       res.end(`<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>RAILWAY GATEWAY // DASHBOARD</title>
-  <script src="https://cdn.tailwindcss.com"><\/script>
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-  <style>
-    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&display=swap');
-    body { font-family: 'JetBrains Mono', monospace; background-color: #0a0b10; }
-    .cyber-glow { box-shadow: 0 0 15px rgba(59, 130, 246, 0.2); }
-    .cyber-glow-green { box-shadow: 0 0 15px rgba(16, 185, 129, 0.4); }
-    .neon-border { border: 1px solid rgba(59, 130, 246, 0.3); }
-    .neon-border:hover { border-color: rgba(59, 130, 246, 0.8); }
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
-    ::-webkit-scrollbar-track { background: #0f111a; }
-    ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 3px; }
-    ::-webkit-scrollbar-thumb:hover { background: #3b82f6; }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAILWAY GATEWAY</title>
+<script src="https://cdn.tailwindcss.com"><\/script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&display=swap');
+body { font-family: 'JetBrains Mono', monospace; background-color: #0a0b10; }
+.cyber-glow { box-shadow: 0 0 15px rgba(59, 130, 246, 0.2); }
+.cyber-glow-green { box-shadow: 0 0 15px rgba(16, 185, 129, 0.4); }
+.neon-border { border: 1px solid rgba(59, 130, 246, 0.3); }
+.neon-border:hover { border-color: rgba(59, 130, 246, 0.8); }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #0f111a; }
+::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #3b82f6; }
+</style>
 </head>
-<body class="text-slate-300 min-h-screen flex flex-col justify-between">
+<body class="text-slate-300 min-h-screen flex flex-col justify-between selection:bg-blue-600 selection:text-white">
 
-  <header class="border-b border-slate-900 bg-[#0d0e16]/80 backdrop-blur-md sticky top-0 z-50 px-6 py-4">
-    <div class="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
-      <div class="flex items-center gap-3">
-        <div class="h-10 w-10 rounded-lg bg-blue-600/10 border border-blue-500/30 flex items-center justify-center text-blue-400 cyber-glow animate-pulse">
-          <i class="fa-solid fa-terminal text-lg"></i>
-        </div>
-        <div>
-          <h1 class="text-xl font-bold tracking-wider text-white">RAILWAY_GATEWAY<span class="text-blue-500">.sys</span></h1>
-          <p class="text-xs text-slate-500">CORE NODE ACTIVE & SECURED</p>
-        </div>
+<header class="border-b border-slate-900 bg-[#0d0e16]/80 backdrop-blur-md sticky top-0 z-50 px-6 py-4">
+  <div class="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
+    <div class="flex items-center gap-3">
+      <div class="h-10 w-10 rounded-lg bg-blue-600/10 border border-blue-500/30 flex items-center justify-center text-blue-400 cyber-glow animate-pulse">
+        <i class="fa-solid fa-terminal text-lg"></i>
       </div>
+      <div>
+        <h1 class="text-xl font-bold tracking-wider text-white">RAILWAY_GATEWAY<span class="text-blue-500">.sys</span></h1>
+        <p class="text-xs text-slate-500">CORE NODE ACTIVE & SECURED</p>
+      </div>
+    </div>
+    <div class="flex items-center gap-4">
       <div class="flex items-center gap-2 bg-[#121420] neon-border px-4 py-2 rounded-lg">
         <span class="h-2.5 w-2.5 rounded-full bg-emerald-500 cyber-glow-green animate-ping"></span>
         <span class="text-xs font-semibold text-emerald-400 tracking-wider">SYSTEM ONLINE</span>
       </div>
     </div>
-  </header>
+  </div>
+</header>
 
-  <main class="max-w-7xl w-full mx-auto p-6 space-y-8 flex-grow">
-    <div class="grid grid-cols-1 md:grid-cols-5 gap-4">
-      <div class="bg-[#0d0e16] neon-border p-5 rounded-xl flex items-center justify-between">
-        <div><p class="text-xs text-slate-500 mb-1">SYSTEM UPTIME</p><p id="uptime-val" class="text-lg font-bold text-white">${uptime}s</p></div>
-        <i class="fa-solid fa-clock text-slate-700 text-2xl"></i>
-      </div>
-      <div class="bg-[#0d0e16] neon-border p-5 rounded-xl flex items-center justify-between">
-        <div><p class="text-xs text-slate-500 mb-1">RAM</p><p class="text-lg font-bold text-white">${ramUsed} MB</p></div>
-        <i class="fa-solid fa-microchip text-slate-700 text-2xl"></i>
-      </div>
-      <div class="bg-[#0d0e16] neon-border p-5 rounded-xl flex items-center justify-between">
-        <div><p class="text-xs text-slate-500 mb-1">TRAFFIC RX</p><p id="rx-val" class="text-lg font-bold text-cyan-400">${formatBytes(this.totalRX)}</p></div>
-        <i class="fa-solid fa-download text-cyan-900/50 text-2xl"></i>
-      </div>
-      <div class="bg-[#0d0e16] neon-border p-5 rounded-xl flex items-center justify-between">
-        <div><p class="text-xs text-slate-500 mb-1">TRAFFIC TX</p><p id="tx-val" class="text-lg font-bold text-pink-400">${formatBytes(this.totalTX)}</p></div>
-        <i class="fa-solid fa-upload text-pink-900/50 text-2xl"></i>
-      </div>
-      <div class="bg-[#0d0e16] neon-border p-5 rounded-xl flex items-center justify-between">
-        <div><p class="text-xs text-slate-500 mb-1">NODE</p><p class="text-lg font-bold text-blue-400">${nodeVersion}</p></div>
-        <i class="fa-brands fa-node-js text-blue-900/50 text-2xl"></i>
-      </div>
+<main class="max-w-7xl w-full mx-auto p-6 space-y-8 flex-grow">
+
+  <div class="grid grid-cols-1 md:grid-cols-5 gap-4">
+    <div class="bg-[#0d0e16] neon-border p-5 rounded-xl flex items-center justify-between">
+      <div><p class="text-xs text-slate-500 mb-1">SYSTEM UPTIME</p><p id="uptime-val" class="text-lg font-bold text-white">${uptime}s</p></div>
+      <i class="fa-solid fa-clock text-slate-700 text-2xl"></i>
+    </div>
+    <div class="bg-[#0d0e16] neon-border p-5 rounded-xl flex items-center justify-between">
+      <div><p class="text-xs text-slate-500 mb-1">RAM ALLOCATION</p><p class="text-lg font-bold text-white">${ramUsed} MB</p></div>
+      <i class="fa-solid fa-microchip text-slate-700 text-2xl"></i>
+    </div>
+    <div class="bg-[#0d0e16] neon-border p-5 rounded-xl flex items-center justify-between">
+      <div><p class="text-xs text-slate-500 mb-1">TRAFFIC RX</p><p id="rx-val" class="text-lg font-bold text-cyan-400">${formatBytes(this.totalRX)}</p></div>
+      <i class="fa-solid fa-download text-cyan-900/50 text-2xl"></i>
+    </div>
+    <div class="bg-[#0d0e16] neon-border p-5 rounded-xl flex items-center justify-between">
+      <div><p class="text-xs text-slate-500 mb-1">TRAFFIC TX</p><p id="tx-val" class="text-lg font-bold text-pink-400">${formatBytes(this.totalTX)}</p></div>
+      <i class="fa-solid fa-upload text-pink-900/50 text-2xl"></i>
+    </div>
+    <div class="bg-[#0d0e16] neon-border p-5 rounded-xl flex items-center justify-between">
+      <div><p class="text-xs text-slate-500 mb-1">NODE VERSION</p><p class="text-lg font-bold text-blue-400">${nodeVersion}</p></div>
+      <i class="fa-brands fa-node-js text-blue-900/50 text-2xl"></i>
+    </div>
+  </div>
+
+  <div class="bg-[#0d0e16] border border-slate-900 rounded-xl p-6 space-y-5">
+    <div class="flex items-center gap-2 border-b border-slate-900 pb-3">
+      <i class="fa-solid fa-key text-yellow-400"></i>
+      <h2 class="text-md font-bold tracking-wide text-white">VLESS / TROJAN ACCOUNT GENERATOR</h2>
+      <span id="current-domain-badge" class="text-[10px] bg-blue-500/10 text-blue-400 px-2 py-0.5 rounded border border-blue-500/20 ml-auto">🌐 detecting...</span>
     </div>
 
-    <div class="bg-[#0d0e16] border border-slate-900 rounded-xl p-6 space-y-5">
-      <div class="flex items-center gap-2 border-b border-slate-900 pb-3">
-        <i class="fa-solid fa-key text-yellow-400"></i>
-        <h2 class="text-md font-bold text-white">VLESS / TROJAN GENERATOR</h2>
-        <span id="current-domain-badge" class="text-[10px] bg-blue-500/10 text-blue-400 px-2 py-0.5 rounded border border-blue-500/20 ml-auto">🌐 detecting...</span>
-      </div>
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
-        <div class="space-y-4">
-          <div>
-            <label class="text-xs text-slate-400 mb-1.5 block">UUID</label>
-            <div class="flex gap-2">
-              <input id="uuidInput" type="text" value="853b8456-0c0b-4bfa-b3b4-b2619248a9bc" class="w-full bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono">
-              <button id="randomUuidBtn" class="bg-blue-600/20 border border-blue-500/30 text-blue-400 hover:bg-blue-600 hover:text-white px-3 py-2 rounded-lg text-xs">RND</button>
-            </div>
-          </div>
-          <div>
-            <label class="text-xs text-slate-400 mb-1.5 block">Host</label>
-            <input id="hostInput" type="text" value="${currentHost}" class="w-full bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono">
-          </div>
-          <div>
-            <label class="text-xs text-slate-400 mb-1.5 block">Port</label>
-            <input id="portInput" type="text" value="443" class="w-full bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono">
-          </div>
-          <div>
-            <label class="text-xs text-slate-400 mb-1.5 block">Network Mode</label>
-            <div class="flex gap-2">
-              <label class="flex-1 flex items-center gap-2 bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 cursor-pointer">
-                <input type="radio" name="netMode" value="tcp" checked>
-                <span class="text-xs text-slate-300">TCP</span>
-              </label>
-              <label class="flex-1 flex items-center gap-2 bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 cursor-pointer">
-                <input type="radio" name="netMode" value="xudp">
-                <span class="text-xs text-slate-300">XUDP</span>
-              </label>
-            </div>
-          </div>
-          <div>
-            <label class="text-xs text-slate-400 mb-1.5 block">Path</label>
-            <div class="flex gap-2">
-              <select id="pathSelect" class="bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono">
-                <option value="/ALL">/ALL</option>
-                <option value="/xudp">/xudp</option>
-                <option value="/ID">/ID</option>
-                <option value="/SG">/SG</option>
-                <option value="/JP">/JP</option>
-                <option value="/US">/US</option>
-                <option value="/ASIA">/ASIA</option>
-                <option value="/EUROPE">/EUROPE</option>
-                <option value="/AMERICA">/AMERICA</option>
-              </select>
-              <input id="pathInput" type="text" value="/ALL" class="w-full bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono">
-            </div>
-          </div>
-          <div>
-            <label class="text-xs text-slate-400 mb-1.5 block">SNI</label>
-            <input id="sniInput" type="text" value="business.whatsapp.com" class="w-full bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono">
-          </div>
-          <div>
-            <label class="text-xs text-slate-400 mb-1.5 block">Remark</label>
-            <input id="remarkInput" type="text" value="KOPI KAPAL ⚡" class="w-full bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono">
-          </div>
-          <button id="generateBtn" class="w-full bg-gradient-to-r from-yellow-500 to-orange-600 text-black font-bold py-2.5 rounded-lg text-sm">GENERATE</button>
-        </div>
-        <div class="space-y-3">
-          <div class="bg-[#07080e] rounded-lg p-4 border border-slate-950">
-            <div class="flex justify-between mb-2">
-              <span class="text-[10px] bg-purple-500/10 text-purple-400 px-2 py-0.5 rounded font-bold">VLESS</span>
-              <button onclick="copyText(document.getElementById('vlessOutput').textContent)" class="text-xs text-slate-400">COPY</button>
-            </div>
-            <p id="vlessOutput" class="text-xs text-purple-300 font-mono break-all">Loading...</p>
-          </div>
-          <div class="bg-[#07080e] rounded-lg p-4 border border-slate-950">
-            <div class="flex justify-between mb-2">
-              <span class="text-[10px] bg-orange-500/10 text-orange-400 px-2 py-0.5 rounded font-bold">TROJAN</span>
-              <button onclick="copyText(document.getElementById('trojanOutput').textContent)" class="text-xs text-slate-400">COPY</button>
-            </div>
-            <p id="trojanOutput" class="text-xs text-orange-300 font-mono break-all">Loading...</p>
-          </div>
-        </div>
-      </div>
-    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
 
+      <div class="space-y-4">
+        <div>
+          <label class="text-xs text-slate-400 font-medium mb-1.5 block">UUID / Password</label>
+          <div class="flex gap-2">
+            <input id="uuidInput" type="text" value="853b8456-0c0b-4bfa-b3b4-b2619248a9bc"
+                   class="w-full bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono focus:border-blue-500 focus:outline-none transition">
+            <button id="randomUuidBtn" class="bg-blue-600/20 border border-blue-500/30 text-blue-400 hover:bg-blue-600 hover:text-white px-3 py-2 rounded-lg text-xs transition flex items-center gap-1 whitespace-nowrap">
+              <i class="fa-solid fa-shuffle"></i> RANDOM
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <label class="text-xs text-slate-400 font-medium mb-1.5 block">Host / Domain (Auto Detect)</label>
+          <input id="hostInput" type="text" value="${currentHost}"
+                 class="w-full bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono focus:border-blue-500 focus:outline-none transition">
+        </div>
+
+        <div>
+          <label class="text-xs text-slate-400 font-medium mb-1.5 block">Port</label>
+          <input id="portInput" type="text" value="443"
+                 class="w-full bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono focus:border-blue-500 focus:outline-none transition">
+        </div>
+
+        <div>
+          <label class="text-xs text-slate-400 font-medium mb-1.5 block">Path</label>
+          <div class="flex gap-2">
+            <select id="pathSelect"
+                    class="bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono focus:border-blue-500 focus:outline-none transition">
+              <option value="/ALL">🌍 /ALL (Rotate Global)</option>
+              <option value="/xudp">🛰️ /xudp (UDP Relay)</option>
+              <option value="/ID">🇮🇩 /ID (Indonesia)</option>
+              <option value="/SG">🇸🇬 /SG (Singapore)</option>
+              <option value="/JP">🇯🇵 /JP (Japan)</option>
+              <option value="/US">🇺🇸 /US (USA)</option>
+              <option value="/ASIA">🌏 /ASIA (Asia Region)</option>
+              <option value="/EUROPE">🇪🇺 /EUROPE</option>
+              <option value="/AMERICA">🌎 /AMERICA</option>
+              <option value="/PROXYLIST/ID,SG,JP">🔀 /PROXYLIST (Multi)</option>
+              <option value="/PUTAR">🎰 /PUTAR (Spin)</option>
+            </select>
+            <input id="pathInput" type="text" value="/ALL"
+                   class="w-full bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono focus:border-blue-500 focus:outline-none transition">
+          </div>
+        </div>
+
+        <div>
+          <label class="text-xs text-slate-400 font-medium mb-1.5 block">
+            <i class="fa-solid fa-fingerprint text-purple-400 mr-1"></i> SNI
+          </label>
+          <select id="sniSelect"
+                  class="w-full bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono focus:border-purple-500 focus:outline-none transition mb-2">
+            <option value="business.whatsapp.com">📱 business.whatsapp.com</option>
+            <option value="media-sin6-3.cdn.whatsapp.net">📡 media-sin6-3.cdn.whatsapp.net</option>
+            <option value="c.whatsapp.com">💬 c.whatsapp.com</option>
+            <option value="web.whatsapp.com">🌐 web.whatsapp.com</option>
+            <option value="v.whatsapp.net">📞 v.whatsapp.net</option>
+            <option value="custom">✏️ CUSTOM SNI...</option>
+          </select>
+          <input id="sniInput" type="text" value="business.whatsapp.com"
+                 class="w-full bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono focus:border-purple-500 focus:outline-none transition"
+                 placeholder="Ketik manual SNI custom...">
+        </div>
+
+        <div>
+          <label class="text-xs text-slate-400 font-medium mb-1.5 block">Nama / Remark</label>
+          <input id="remarkInput" type="text" value="KOPI KAPAL ⚡"
+                 class="w-full bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono focus:border-blue-500 focus:outline-none transition">
+        </div>
+
+        <button id="generateBtn"
+                class="w-full bg-gradient-to-r from-yellow-500 to-orange-600 hover:from-yellow-400 hover:to-orange-500 text-black font-bold py-2.5 px-4 rounded-lg transition text-sm flex items-center justify-center gap-2 active:scale-95">
+          <i class="fa-solid fa-bolt"></i> GENERATE ACCOUNTS
+        </button>
+      </div>
+
+      <div class="space-y-3">
+        <label class="text-xs text-slate-400 font-medium block">📋 Hasil Generate</label>
+
+        <div class="space-y-2">
+          <div class="bg-[#07080e] rounded-lg p-4 border border-slate-950">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-[10px] bg-purple-500/10 text-purple-400 px-2 py-0.5 rounded font-bold border border-purple-500/20">VLESS</span>
+              <button onclick="copyText(document.getElementById('vlessOutput').textContent)"
+                      class="text-xs bg-[#171a29] border border-slate-800 text-slate-400 hover:text-purple-400 px-2 py-1 rounded transition flex items-center gap-1">
+                <i class="fa-regular fa-copy"></i> COPY
+              </button>
+            </div>
+            <p id="vlessOutput" class="text-xs text-purple-300 font-mono break-all leading-relaxed bg-[#0a0b12] p-2 rounded border border-slate-900">Loading...</p>
+          </div>
+
+          <div class="bg-[#07080e] rounded-lg p-4 border border-slate-950">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-[10px] bg-orange-500/10 text-orange-400 px-2 py-0.5 rounded font-bold border border-orange-500/20">TROJAN</span>
+              <button onclick="copyText(document.getElementById('trojanOutput').textContent)"
+                      class="text-xs bg-[#171a29] border border-slate-800 text-slate-400 hover:text-orange-400 px-2 py-1 rounded transition flex items-center gap-1">
+                <i class="fa-regular fa-copy"></i> COPY
+              </button>
+            </div>
+            <p id="trojanOutput" class="text-xs text-orange-300 font-mono break-all leading-relaxed bg-[#0a0b12] p-2 rounded border border-slate-900">Loading...</p>
+          </div>
+        </div>
+
+        <div class="bg-[#10121d] border border-slate-800 rounded-lg p-3">
+          <p class="text-[10px] text-slate-500 mb-1">🔗 FORMAT IMPORT CLASH META / V2RAY</p>
+          <pre id="clashOutput" class="text-[11px] text-slate-400 font-mono break-all leading-relaxed whitespace-pre-wrap bg-[#0a0b12] p-2 rounded border border-slate-900 max-h-48 overflow-y-auto">Loading...</pre>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
     <div class="bg-[#0d0e16] border border-slate-900 rounded-xl p-6 space-y-4">
       <div class="flex items-center gap-2 border-b border-slate-900 pb-3">
         <i class="fa-solid fa-network-wired text-blue-400"></i>
-        <h2 class="text-md font-bold text-white">WEBSOCKET ENDPOINTS</h2>
+        <h2 class="text-md font-bold tracking-wide text-white">WEBSOCKET ROUTING ENDPOINTS</h2>
       </div>
-      <div class="space-y-2">
-        <div class="bg-[#10121d] border border-slate-900/60 p-4 rounded-lg flex justify-between items-center">
+      <div class="space-y-3 max-h-[420px] overflow-y-auto pr-1">
+        <div class="bg-[#10121d] border border-slate-900/60 p-4 rounded-lg flex flex-col md:flex-row justify-between items-start md:items-center gap-3 hover:bg-[#121524] transition">
           <div>
-            <span class="text-xs bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded font-bold">XUDP NATIVE (VLESS+XUDP)</span>
-            <p class="text-sm text-slate-200 mt-2"><span class="ws-domain">${protocolWs}</span>://<span class="ws-host">${currentHost}</span>/xudp</p>
+            <span class="text-xs bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded font-bold border border-emerald-500/20">UDP RELAY (ALIAS /ALL)</span>
+            <p class="text-sm font-semibold text-slate-200 mt-2"><span class="ws-domain">${protocolWs}</span>://<span class="ws-host">${currentHost}</span>/xudp</p>
           </div>
-          <button onclick="copyDynamic('xudp')" class="text-xs bg-[#171a29] border border-slate-800 text-slate-400 px-3 py-1.5 rounded">COPY</button>
+          <button onclick="copyDynamic('xudp')" class="text-xs bg-[#171a29] border border-slate-800 text-slate-400 hover:text-white hover:border-emerald-500 px-3 py-1.5 rounded transition flex items-center gap-1.5 active:scale-95">
+            <i class="fa-regular fa-copy"></i> COPY
+          </button>
         </div>
-        <div class="bg-[#10121d] border border-slate-900/60 p-4 rounded-lg flex justify-between items-center">
+
+        <div class="bg-[#10121d] border border-slate-900/60 p-4 rounded-lg flex flex-col md:flex-row justify-between items-start md:items-center gap-3 hover:bg-[#121524] transition">
           <div>
-            <span class="text-xs bg-blue-500/10 text-blue-400 px-2 py-0.5 rounded font-bold">RAW UDP/TCP</span>
-            <p class="text-sm text-slate-200 mt-2"><span class="ws-domain">${protocolWs}</span>://<span class="ws-host">${currentHost}</span>/ALL</p>
+            <span class="text-xs bg-blue-500/10 text-blue-400 px-2 py-0.5 rounded font-bold border border-blue-500/20">TARGET COUNTRY</span>
+            <p class="text-sm font-semibold text-slate-200 mt-2"><span class="ws-domain">${protocolWs}</span>://<span class="ws-host">${currentHost}</span>/ID</p>
           </div>
-          <button onclick="copyDynamic('ALL')" class="text-xs bg-[#171a29] border border-slate-800 text-slate-400 px-3 py-1.5 rounded">COPY</button>
+          <button onclick="copyDynamic('ID')" class="text-xs bg-[#171a29] border border-slate-800 text-slate-400 hover:text-white hover:border-blue-500 px-3 py-1.5 rounded transition flex items-center gap-1.5 active:scale-95">
+            <i class="fa-regular fa-copy"></i> COPY
+          </button>
+        </div>
+
+        <div class="bg-[#10121d] border border-slate-900/60 p-4 rounded-lg flex flex-col md:flex-row justify-between items-start md:items-center gap-3 hover:bg-[#121524] transition">
+          <div>
+            <span class="text-xs bg-purple-500/10 text-purple-400 px-2 py-0.5 rounded font-bold border border-purple-500/20">MULTI-COUNTRY (ROTATE)</span>
+            <p class="text-sm font-semibold text-slate-200 mt-2"><span class="ws-domain">${protocolWs}</span>://<span class="ws-host">${currentHost}</span>/PROXYLIST/ID,SG,JP</p>
+          </div>
+          <button onclick="copyDynamic('PROXYLIST/ID,SG,JP')" class="text-xs bg-[#171a29] border border-slate-800 text-slate-400 hover:text-white hover:border-blue-500 px-3 py-1.5 rounded transition flex items-center gap-1.5 active:scale-95">
+            <i class="fa-regular fa-copy"></i> COPY
+          </button>
+        </div>
+
+        <div class="bg-[#10121d] border border-slate-900/60 p-4 rounded-lg flex flex-col md:flex-row justify-between items-start md:items-center gap-3 hover:bg-[#121524] transition">
+          <div>
+            <span class="text-xs bg-amber-500/10 text-amber-400 px-2 py-0.5 rounded font-bold border border-amber-500/20">REGION MATRICES</span>
+            <p class="text-sm font-semibold text-slate-200 mt-2"><span class="ws-domain">${protocolWs}</span>://<span class="ws-host">${currentHost}</span>/ASIA</p>
+          </div>
+          <button onclick="copyDynamic('ASIA')" class="text-xs bg-[#171a29] border border-slate-800 text-slate-400 hover:text-white hover:border-blue-500 px-3 py-1.5 rounded transition flex items-center gap-1.5 active:scale-95">
+            <i class="fa-regular fa-copy"></i> COPY
+          </button>
+        </div>
+
+        <div class="bg-[#10121d] border border-slate-900/60 p-4 rounded-lg flex flex-col md:flex-row justify-between items-start md:items-center gap-3 hover:bg-[#121524] transition">
+          <div>
+            <span class="text-xs bg-pink-500/10 text-pink-400 px-2 py-0.5 rounded font-bold border border-pink-500/20">GLOBAL CLUSTER</span>
+            <p class="text-sm font-semibold text-slate-200 mt-2"><span class="ws-domain">${protocolWs}</span>://<span class="ws-host">${currentHost}</span>/ALL</p>
+          </div>
+          <button onclick="copyDynamic('ALL')" class="text-xs bg-[#171a29] border border-slate-800 text-slate-400 hover:text-white hover:border-blue-500 px-3 py-1.5 rounded transition flex items-center gap-1.5 active:scale-95">
+            <i class="fa-regular fa-copy"></i> COPY
+          </button>
         </div>
       </div>
     </div>
-  </main>
 
-  <footer class="border-t border-slate-950 bg-[#07080d] px-6 py-4 text-center text-xs text-slate-600">
-    &copy; 2025 RAILWAY GATEWAY
-  </footer>
+    <div class="bg-[#0d0e16] border border-slate-900 rounded-xl p-6 space-y-4" id="api-section" style="display: none;">
+      <div class="flex items-center gap-2 border-b border-slate-900 pb-3">
+        <i class="fa-solid fa-gears text-emerald-400"></i>
+        <h2 class="text-md font-bold tracking-wide text-white">REST INTEGRATION ENDPOINTS</h2>
+      </div>
+      <div class="space-y-3">
+        <div class="bg-[#10121d] border border-slate-900/60 p-4 rounded-lg flex items-center justify-between hover:bg-[#121524] transition">
+          <div>
+            <span class="text-[10px] bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded font-bold border border-emerald-500/20 mr-2">GET</span>
+            <span class="text-xs text-slate-500 font-medium">JSON LIST DIRECTORY</span>
+            <p class="text-sm font-semibold text-slate-200 mt-2"><span class="http-domain">${protocolHttp}</span>://<span class="http-host">${currentHost}</span>/api/proxies</p>
+          </div>
+          <button onclick="testDynamic('api/proxies')" class="text-xs bg-blue-600/10 border border-blue-500/20 text-blue-400 hover:bg-blue-600 hover:text-white px-3 py-1.5 rounded transition">
+            <i class="fa-solid fa-arrow-up-right-from-square"></i> TEST
+          </button>
+        </div>
 
-  <div id="toast" class="fixed bottom-6 right-6 bg-blue-600 text-white px-4 py-2 rounded opacity-0 pointer-events-none text-xs"></div>
+        <div class="bg-[#10121d] border border-slate-900/60 p-4 rounded-lg flex items-center justify-between hover:bg-[#121524] transition">
+          <div>
+            <span class="text-[10px] bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded font-bold border border-emerald-500/20 mr-2">GET</span>
+            <span class="text-xs text-slate-500 font-medium">PLAIN STRING PARSED</span>
+            <p class="text-sm font-semibold text-slate-200 mt-2"><span class="http-domain">${protocolHttp}</span>://<span class="http-host">${currentHost}</span>/api/proxies?format=text</p>
+          </div>
+          <button onclick="testDynamic('api/proxies?format=text')" class="text-xs bg-blue-600/10 border border-blue-500/20 text-blue-400 hover:bg-blue-600 hover:text-white px-3 py-1.5 rounded transition">
+            <i class="fa-solid fa-arrow-up-right-from-square"></i> TEST
+          </button>
+        </div>
 
-  <script>
-    const currentDomain = window.location.hostname;
-    const isSecure = window.location.protocol === 'https:';
-    const wsProtocol = isSecure ? 'wss' : 'ws';
-    const httpProtocol = isSecure ? 'https' : 'http';
+        <div class="bg-[#10121d] border border-slate-900/60 p-4 rounded-lg flex items-center justify-between hover:bg-[#121524] transition">
+          <div>
+            <span class="text-[10px] bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded font-bold border border-emerald-500/20 mr-2">GET</span>
+            <span class="text-xs text-slate-500 font-medium">HEALTH MONITOR</span>
+            <p class="text-sm font-semibold text-slate-200 mt-2"><span class="http-domain">${protocolHttp}</span>://<span class="http-host">${currentHost}</span>/health</p>
+          </div>
+          <button onclick="testDynamic('health')" class="text-xs bg-blue-600/10 border border-blue-500/20 text-blue-400 hover:bg-blue-600 hover:text-white px-3 py-1.5 rounded transition">
+            <i class="fa-solid fa-arrow-up-right-from-square"></i> TEST
+          </button>
+        </div>
 
-    function updateAllDomains() {
-      const hostInput = document.getElementById('hostInput');
-      if (hostInput) hostInput.value = currentDomain;
-      document.getElementById('current-domain-badge').innerHTML = '🌐 ' + currentDomain;
-      document.querySelectorAll('.ws-domain').forEach(el => el.textContent = wsProtocol);
-      document.querySelectorAll('.ws-host').forEach(el => el.textContent = currentDomain);
-    }
-    updateAllDomains();
+        <div class="bg-[#10121d] border border-slate-900/60 p-4 rounded-lg flex items-center justify-between hover:bg-[#121524] transition">
+          <div>
+            <span class="text-[10px] bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded font-bold border border-emerald-500/20 mr-2">GET</span>
+            <span class="text-xs text-slate-500 font-medium">UDP LIVE STATS</span>
+            <p class="text-sm font-semibold text-slate-200 mt-2"><span class="http-domain">${protocolHttp}</span>://<span class="http-host">${currentHost}</span>/api/relay-stats</p>
+          </div>
+          <button onclick="testDynamic('api/relay-stats')" class="text-xs bg-blue-600/10 border border-blue-500/20 text-blue-400 hover:bg-blue-600 hover:text-white px-3 py-1.5 rounded transition">
+            <i class="fa-solid fa-arrow-up-right-from-square"></i> TEST
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
 
-    function copyDynamic(path) { copyText(wsProtocol + '://' + currentDomain + '/' + path); }
-    function copyText(text) {
-      navigator.clipboard.writeText(text).then(() => {
-        const toast = document.getElementById('toast');
-        toast.textContent = 'Copied!';
-        toast.classList.remove('opacity-0','pointer-events-none');
-        setTimeout(() => toast.classList.add('opacity-0','pointer-events-none'), 1500);
-      });
-    }
+  <div class="flex justify-center mt-4">
+    <button id="toggleApiBtn" onclick="toggleApi()" class="bg-[#1e293b] border border-slate-700 text-slate-400 hover:text-white hover:border-blue-500 px-5 py-2.5 rounded-lg text-sm font-semibold transition flex items-center gap-2">
+      <i class="fa-solid fa-eye-slash"></i> <span id="toggleApiText">Show API Endpoints</span>
+    </button>
+  </div>
 
-    let uptimeStart = ${uptime};
-    setInterval(() => {
-      uptimeStart++;
-      document.getElementById('uptime-val').innerText = uptimeStart + 's';
-    }, 1000);
+  <div class="bg-[#0d0e16] border border-slate-900 rounded-xl p-6 space-y-4">
+    <div class="flex items-center gap-2 border-b border-slate-900 pb-3">
+      <i class="fa-solid fa-rectangle-list text-purple-400"></i>
+      <h2 class="text-md font-bold tracking-wide text-white">INTEGRATION EXECUTION EXAMPLES</h2>
+    </div>
+    <div class="bg-[#07080e] rounded-lg p-5 border border-slate-950 font-mono text-xs sm:text-sm text-slate-400 space-y-4 overflow-x-auto">
+      <div>
+        <p class="text-slate-600 mb-1">// Query cluster via terminal</p>
+        <div class="flex items-center justify-between bg-[#0a0b12] p-3 rounded border border-slate-900">
+          <span class="text-blue-400 curl-example-1">curl ${protocolHttp}://${currentHost}/api/proxies</span>
+          <button onclick="copyDynamicText('curl ' + getHttpProtocol() + '://' + getCurrentDomain() + '/api/proxies')" class="text-slate-600 hover:text-blue-400 transition"><i class="fa-regular fa-copy"></i></button>
+        </div>
+      </div>
+      <div>
+        <p class="text-slate-600 mb-1">// Direct tunneling</p>
+        <div class="flex items-center justify-between bg-[#0a0b12] p-3 rounded border border-slate-900">
+          <span class="text-purple-400 wscat-example">wscat -c ${protocolWs}://${currentHost}/ID</span>
+          <button onclick="copyDynamicText('wscat -c ' + getWsProtocol() + '://' + getCurrentDomain() + '/ID')" class="text-slate-600 hover:text-purple-400 transition"><i class="fa-regular fa-copy"></i></button>
+        </div>
+      </div>
+    </div>
+  </div>
 
-    async function updateTraffic() {
-      try {
-        const res = await fetch('/health');
-        const data = await res.json();
-        if(data.traffic) {
-          document.getElementById('rx-val').innerText = data.traffic.rx_formatted || '0 B';
-          document.getElementById('tx-val').innerText = data.traffic.tx_formatted || '0 B';
-        }
-      } catch(e) {}
-    }
-    setInterval(updateTraffic, 5000);
+</main>
 
-    function generateUUID() {
-      const uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-        const r = Math.random() * 16 | 0;
-        const v = c === 'x' ? r : (r & 0x3 | 0x8);
-        return v.toString(16);
-      });
-      document.getElementById('uuidInput').value = uuid;
-      generateAccounts();
-    }
+<footer class="border-t border-slate-950 bg-[#07080d] px-6 py-4 text-center text-xs text-slate-600">
+  <div class="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
+    <p>&copy; 2025 RAILWAY GATEWAY. ALL SYSTEM VECTORS OPERATIONAL.</p>
+    <p class="flex items-center gap-1"><i class="fa-solid fa-shield text-blue-500/40"></i> SECURED BY END-TO-END KERNEL TUNNEL</p>
+  </div>
+</footer>
 
-    function generateTrojanPass() {
-      const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-      let pass = '';
-      for (let i = 0; i < 36; i++) {
-        if (i === 8 || i === 13 || i === 18 || i === 23) pass += '-';
-        else pass += chars.charAt(Math.floor(Math.random() * chars.length));
-      }
-      return pass;
-    }
+<div id="toast" class="fixed bottom-6 right-6 bg-blue-600 text-white font-semibold px-4 py-2.5 rounded-lg shadow-lg opacity-0 pointer-events-none transition-all duration-300 transform translate-y-2 text-xs z-50 flex items-center gap-2">
+  <i class="fa-solid fa-circle-check"></i> ENDPOINT COPIED
+</div>
 
-    function generateAccounts() {
-      try {
-        const uuid = document.getElementById('uuidInput').value.trim() || '853b8456-0c0b-4bfa-b3b4-b2619248a9bc';
-        const host = document.getElementById('hostInput').value.trim() || currentDomain;
-        const port = document.getElementById('portInput').value.trim() || '443';
-        let path = document.getElementById('pathInput').value.trim() || '/ALL';
-        const netModeEl = document.querySelector('input[name="netMode"]:checked');
-        const netMode = netModeEl ? netModeEl.value : 'tcp';
-        const isXudp = netMode === 'xudp';
-        if (isXudp && (path === '/ALL' || path === '')) path = '/xudp';
-        const sni = document.getElementById('sniInput').value.trim() || 'business.whatsapp.com';
-        const remark = document.getElementById('remarkInput').value.trim() || 'KOPI KAPAL';
-        const encodedPath = encodeURIComponent(path);
-        const encodedRemark = encodeURIComponent(remark);
+<script>
+const currentDomain = window.location.hostname;
+const isSecure = window.location.protocol === 'https:';
+const wsProtocol = isSecure ? 'wss' : 'ws';
+const httpProtocol = isSecure ? 'https' : 'http';
 
-        let vlessQuery = 'encryption=none&security=tls&sni=' + sni +
-                         '&fp=randomized&type=ws&host=' + host +
-                         '&path=' + encodedPath;
-        if (isXudp) vlessQuery += '&packetEncoding=xudp';
-        const vlessUrl = 'vless://' + uuid + '@' + host + ':' + port + '?' + vlessQuery + '#' + encodedRemark;
+function updateAllDomains() {
+  const hostInput = document.getElementById('hostInput');
+  if (hostInput && currentDomain !== hostInput.value) hostInput.value = currentDomain;
 
-        const trojanPass = generateTrojanPass();
-        const trojanUrl = 'trojan://' + trojanPass + '@' + host + ':' + port +
-                          '?security=tls&sni=' + sni +
-                          '&type=ws&host=' + host +
-                          '&path=' + encodedPath + '#' + encodedRemark;
+  const badge = document.getElementById('current-domain-badge');
+  if (badge) badge.innerHTML = '🌐 ' + currentDomain;
 
-        document.getElementById('vlessOutput').textContent = vlessUrl;
-        document.getElementById('trojanOutput').textContent = trojanUrl;
-      } catch(err) { console.error(err); }
-    }
+  document.querySelectorAll('.ws-domain').forEach(el => el.textContent = wsProtocol);
+  document.querySelectorAll('.ws-host').forEach(el => el.textContent = currentDomain);
+  document.querySelectorAll('.http-domain').forEach(el => el.textContent = httpProtocol);
+  document.querySelectorAll('.http-host').forEach(el => el.textContent = currentDomain);
 
-    setTimeout(generateAccounts, 300);
+  document.querySelectorAll('.curl-example-1').forEach(el => el.textContent = 'curl ' + httpProtocol + '://' + currentDomain + '/api/proxies');
+  document.querySelectorAll('.wscat-example').forEach(el => el.textContent = 'wscat -c ' + wsProtocol + '://' + currentDomain + '/ID');
+}
+updateAllDomains();
+
+function getCurrentDomain() { return currentDomain; }
+function getWsProtocol() { return wsProtocol; }
+function getHttpProtocol() { return httpProtocol; }
+function copyDynamic(path) { copyText(wsProtocol + '://' + currentDomain + '/' + path); }
+function copyDynamicText(text) { copyText(text); }
+function testDynamic(path) { window.open(httpProtocol + '://' + currentDomain + '/' + path, '_blank'); }
+
+function copyText(text) {
+  navigator.clipboard.writeText(text).then(() => {
+    const toast = document.getElementById('toast');
+    toast.classList.remove('opacity-0', 'pointer-events-none', 'translate-y-2');
+    toast.classList.add('opacity-100', 'translate-y-0');
     setTimeout(() => {
-      ['uuidInput','hostInput','portInput','pathInput','sniInput','remarkInput'].forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.addEventListener('input', generateAccounts);
-      });
-      document.querySelectorAll('input[name="netMode"]').forEach(el => el.addEventListener('change', generateAccounts));
-      document.getElementById('pathSelect').addEventListener('change', function() {
-        document.getElementById('pathInput').value = this.value;
-        generateAccounts();
-      });
-      document.getElementById('generateBtn').addEventListener('click', function(e) { e.preventDefault(); generateAccounts(); });
-      document.getElementById('randomUuidBtn').addEventListener('click', function(e) { e.preventDefault(); generateUUID(); });
-    }, 600);
-  </script>
+      toast.classList.remove('opacity-100', 'translate-y-0');
+      toast.classList.add('opacity-0', 'pointer-events-none', 'translate-y-2');
+    }, 2500);
+  });
+}
+
+let apiVisible = false;
+function toggleApi() {
+  const section = document.getElementById('api-section');
+  const btn = document.getElementById('toggleApiBtn');
+  const icon = btn.querySelector('i');
+  const text = document.getElementById('toggleApiText');
+  apiVisible = !apiVisible;
+  section.style.display = apiVisible ? 'block' : 'none';
+  icon.className = apiVisible ? 'fa-solid fa-eye' : 'fa-solid fa-eye-slash';
+  text.textContent = apiVisible ? 'Hide API Endpoints' : 'Show API Endpoints';
+}
+
+let uptimeStart = ${uptime};
+setInterval(() => {
+  uptimeStart++;
+  document.getElementById('uptime-val').innerText = uptimeStart + 's';
+}, 1000);
+
+async function updateTraffic() {
+  try {
+    const res = await fetch('/health');
+    const data = await res.json();
+    if (data.traffic) {
+      document.getElementById('rx-val').innerText = data.traffic.rx_formatted || '0 B';
+      document.getElementById('tx-val').innerText = data.traffic.tx_formatted || '0 B';
+    }
+  } catch (e) {}
+}
+setInterval(updateTraffic, 5000);
+
+function generateUUID() {
+  const uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    const r = Math.random() * 16 | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+  document.getElementById('uuidInput').value = uuid;
+  generateAccounts();
+}
+
+function generateTrojanPass() {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let pass = '';
+  for (let i = 0; i < 36; i++) {
+    if (i === 8 || i === 13 || i === 18 || i === 23) pass += '-';
+    else pass += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return pass;
+}
+
+function generateAccounts() {
+  try {
+    const uuid = document.getElementById('uuidInput').value.trim() || '853b8456-0c0b-4bfa-b3b4-b2619248a9bc';
+    const host = document.getElementById('hostInput').value.trim() || currentDomain;
+    const port = document.getElementById('portInput').value.trim() || '443';
+    const path = document.getElementById('pathInput').value.trim() || '/ALL';
+    const sni = document.getElementById('sniInput').value.trim() || 'business.whatsapp.com';
+    const remark = document.getElementById('remarkInput').value.trim() || 'KOPI KAPAL';
+    const encodedPath = encodeURIComponent(path);
+    const encodedRemark = encodeURIComponent(remark);
+
+    const vlessUrl = 'vless://' + uuid + '@' + host + ':' + port +
+                     '?encryption=none&security=tls&sni=' + sni +
+                     '&fp=randomized&type=ws&host=' + host +
+                     '&path=' + encodedPath + '#' + encodedRemark;
+
+    const trojanPass = generateTrojanPass();
+    const trojanUrl = 'trojan://' + trojanPass + '@' + host + ':' + port +
+                      '?security=tls&sni=' + sni +
+                      '&type=ws&host=' + host +
+                      '&path=' + encodedPath + '#' + encodedRemark;
+
+    document.getElementById('vlessOutput').textContent = vlessUrl;
+    document.getElementById('trojanOutput').textContent = trojanUrl;
+
+    document.getElementById('clashOutput').textContent =
+      '- name: "' + remark + ' VLESS"\\n' +
+      '  type: vless\\n' +
+      '  server: ' + host + '\\n' +
+      '  port: ' + port + '\\n' +
+      '  uuid: ' + uuid + '\\n' +
+      '  network: ws\\n' +
+      '  tls: true\\n' +
+      '  udp: true\\n' +
+      '  sni: "' + sni + '"\\n' +
+      '  client-fingerprint: randomized\\n' +
+      '  ws-opts:\\n' +
+      '    path: "' + path + '"\\n' +
+      '    headers:\\n' +
+      '      host: "' + host + '"\\n\\n' +
+      '- name: "' + remark + ' TROJAN"\\n' +
+      '  type: trojan\\n' +
+      '  server: ' + host + '\\n' +
+      '  port: ' + port + '\\n' +
+      '  password: ' + trojanPass + '\\n' +
+      '  network: ws\\n' +
+      '  tls: true\\n' +
+      '  udp: true\\n' +
+      '  sni: "' + sni + '"\\n' +
+      '  ws-opts:\\n' +
+      '    path: "' + path + '"\\n' +
+      '    headers:\\n' +
+      '      host: "' + host + '"';
+  } catch (err) { console.error('Generator Error:', err); }
+}
+
+setTimeout(generateAccounts, 300);
+setTimeout(() => {
+  ['uuidInput','hostInput','portInput','pathInput','sniInput','remarkInput'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('input', generateAccounts);
+  });
+  const pathSelect = document.getElementById('pathSelect');
+  if (pathSelect) pathSelect.addEventListener('change', function() {
+    document.getElementById('pathInput').value = this.value;
+    generateAccounts();
+  });
+  const sniSelect = document.getElementById('sniSelect');
+  if (sniSelect) sniSelect.addEventListener('change', function() {
+    const sniInput = document.getElementById('sniInput');
+    if (this.value === 'custom') { sniInput.value = ''; sniInput.focus(); }
+    else { sniInput.value = this.value; generateAccounts(); }
+  });
+  document.getElementById('generateBtn').addEventListener('click', function(e) { e.preventDefault(); generateAccounts(); });
+  document.getElementById('randomUuidBtn').addEventListener('click', function(e) { e.preventDefault(); generateUUID(); });
+}, 600);
+</script>
 </body>
 </html>`);
       return;
@@ -653,16 +665,17 @@ class GatewayServer {
 
     const targetReversePrx = process.env.REVERSE_PRX_TARGET;
     if (targetReversePrx) await this.reverseWeb(req, res, targetReversePrx);
-    else { res.writeHead(404); res.end('Not Found'); }
+    else { res.writeHead(404, { 'Content-Type': 'text/plain' }); res.end('Not Found'); }
   }
 
+  // ==================== PROXY LIST ====================
   async getKVPrxList(kvPrxUrl = KV_PRX_URL) {
     if (!kvPrxUrl) throw new Error("No URL Provided!");
     try {
       const kvPrx = await fetch(kvPrxUrl);
       if (kvPrx.status == 200) return await kvPrx.json();
       return {};
-    } catch { return {}; }
+    } catch (error) { return {}; }
   }
 
   async getPrxList(prxBankUrl) {
@@ -680,9 +693,10 @@ class GatewayServer {
         }).filter(Boolean);
       }
       return [];
-    } catch { return []; }
+    } catch (error) { return []; }
   }
 
+  // ==================== REVERSE PROXY ====================
   async reverseWeb(request, response, target, targetPath) {
     try {
       const targetUrl = new URL(request.url);
@@ -691,9 +705,11 @@ class GatewayServer {
       targetUrl.port = targetChunk[1]?.toString() || "443";
       targetUrl.pathname = targetPath || targetUrl.pathname;
       const options = {
-        hostname: targetUrl.hostname, port: targetUrl.port,
+        hostname: targetUrl.hostname,
+        port: targetUrl.port,
         path: targetUrl.pathname + targetUrl.search,
-        method: request.method, headers: { ...request.headers }
+        method: request.method,
+        headers: { ...request.headers }
       };
       options.headers['host'] = targetUrl.hostname;
       options.headers['x-forwarded-host'] = request.headers.host;
@@ -710,17 +726,17 @@ class GatewayServer {
         let body = [];
         request.on('data', c => body.push(c)).on('end', () => { proxyReq.write(Buffer.concat(body)); proxyReq.end(); });
       } else proxyReq.end();
-    } catch { response.writeHead(500); response.end('Internal server error'); }
+    } catch (err) { response.writeHead(500); response.end('Internal server error'); }
   }
 
-  // ==================== PROXY SELECTION ====================
+  // ==================== WEBSOCKET HANDLERS ====================
   async handleWebSocketConnection(ws, request) {
     try {
       const parsedUrl = url.parse(request.url, true);
-      const originalPath = parsedUrl.pathname;
-      const isXudpPath = originalPath === '/xudp' || originalPath === '/XUDP';
-      const path = isXudpPath ? '/ALL' : originalPath;
-      console.log(`WebSocket request path: ${originalPath}${isXudpPath ? ' (XUDP mode)' : ''}`);
+      let path = parsedUrl.pathname;
+      // /xudp = alias /ALL untuk raw UDP-over-TCP
+      if (path === '/xudp' || path === '/XUDP') path = '/ALL';
+      console.log(`WebSocket request path: ${path}`);
 
       const proxyListMatch = path.match(/^\/PROXYLIST\/([A-Z]{2}(,[A-Z]{2})*)$/i);
       if (proxyListMatch) {
@@ -729,96 +745,138 @@ class GatewayServer {
         if (proxies.length === 0) {
           const kvPrx = await this.getKVPrxList();
           const available = countryCodes.filter(c => kvPrx[c] && kvPrx[c].length > 0);
-          if (!available.length) { ws.close(1000, `No proxies`); return; }
-          const key = available[Math.floor(Math.random() * available.length)];
-          this.prxIP = kvPrx[key][Math.floor(Math.random() * kvPrx[key].length)];
+          if (!available.length) { ws.close(1000, `No proxies for: ${countryCodes.join(",")}`); return; }
+          const prxKey = available[Math.floor(Math.random() * available.length)];
+          this.prxIP = kvPrx[prxKey][Math.floor(Math.random() * kvPrx[prxKey].length)];
         } else {
           const filtered = proxies.filter(p => countryCodes.includes(p.country));
-          if (!filtered.length) { ws.close(1000, `No proxies`); return; }
-          const sel = filtered[Math.floor(Math.random() * filtered.length)];
-          this.prxIP = `${sel.prxIP}:${sel.prxPort}`;
+          if (!filtered.length) { ws.close(1000, `No proxies for: ${countryCodes.join(",")}`); return; }
+          const randomProxy = filtered[Math.floor(Math.random() * filtered.length)];
+          this.prxIP = `${randomProxy.prxIP}:${randomProxy.prxPort}`;
         }
-        await this._dispatch(ws, isXudpPath);
+        console.log(`Selected Proxy: ${this.prxIP}`);
+        await this.websocketHandler(ws);
         return;
       }
 
       const allMatch = path.match(/^\/ALL(\d+)?$/i);
       if (allMatch) {
+        const index = allMatch[1] ? parseInt(allMatch[1], 10) - 1 : null;
         const proxies = await this.getPrxList(process.env.PRX_BANK_URL);
         if (proxies.length === 0) {
           const kvPrx = await this.getKVPrxList();
-          const all = Object.values(kvPrx).flat();
-          if (!all.length) { ws.close(1000, 'No proxies for /ALL'); return; }
-          this.prxIP = all[Math.floor(Math.random() * all.length)];
+          const allProxies = Object.values(kvPrx).flat();
+          if (!allProxies.length) { ws.close(1000, `No proxies for /ALL`); return; }
+          this.prxIP = allProxies[Math.floor(Math.random() * allProxies.length)];
         } else {
-          const sel = proxies[Math.floor(Math.random() * proxies.length)];
-          this.prxIP = `${sel.prxIP}:${sel.prxPort}`;
+          let selectedProxy;
+          if (index === null) { selectedProxy = proxies[Math.floor(Math.random() * proxies.length)]; }
+          else {
+            const grouped = proxies.reduce((acc, p) => { if(!acc[p.country])acc[p.country]=[]; acc[p.country].push(p); return acc; }, {});
+            const byIndex = [];
+            for (const c in grouped) { if (index < grouped[c].length) byIndex.push(grouped[c][index]); }
+            if (!byIndex.length) { ws.close(1000, `No proxy at index ${index+1}`); return; }
+            selectedProxy = byIndex[Math.floor(Math.random() * byIndex.length)];
+          }
+          this.prxIP = `${selectedProxy.prxIP}:${selectedProxy.prxPort}`;
         }
-        await this._dispatch(ws, isXudpPath);
+        console.log(`Selected Proxy: ${this.prxIP}`);
+        await this.websocketHandler(ws);
         return;
       }
 
       const putarMatch = path.match(/^\/PUTAR(\d+)?$/i);
       if (putarMatch) {
+        const countryCount = putarMatch[1] ? parseInt(putarMatch[1], 10) : null;
         const proxies = await this.getPrxList(process.env.PRX_BANK_URL);
         if (proxies.length === 0) {
           const kvPrx = await this.getKVPrxList();
           const countries = Object.keys(kvPrx).filter(c => kvPrx[c]?.length > 0);
-          if (!countries.length) { ws.close(1000, 'No proxies'); return; }
-          const key = countries[Math.floor(Math.random() * countries.length)];
-          this.prxIP = kvPrx[key][Math.floor(Math.random() * kvPrx[key].length)];
+          if (!countries.length) { ws.close(1000, `No proxies`); return; }
+          const shuffled = [...countries].sort(() => Math.random() - 0.5);
+          const selected = countryCount ? shuffled.slice(0, Math.min(countryCount, countries.length)) : shuffled;
+          const prxKey = selected[Math.floor(Math.random() * selected.length)];
+          this.prxIP = kvPrx[prxKey][Math.floor(Math.random() * kvPrx[prxKey].length)];
         } else {
-          const sel = proxies[Math.floor(Math.random() * proxies.length)];
-          this.prxIP = `${sel.prxIP}:${sel.prxPort}`;
+          const grouped = proxies.reduce((acc, p) => { if(!acc[p.country])acc[p.country]=[]; acc[p.country].push(p); return acc; }, {});
+          const countries = Object.keys(grouped);
+          if (!countries.length) { ws.close(1000, `No proxies`); return; }
+          const shuffled = [...countries].sort(() => Math.random() - 0.5);
+          const selected = countryCount ? shuffled.slice(0, Math.min(countryCount, countries.length)) : shuffled;
+          const selProxies = selected.map(c => grouped[c][Math.floor(Math.random() * grouped[c].length)]);
+          const randomProxy = selProxies[Math.floor(Math.random() * selProxies.length)];
+          this.prxIP = `${randomProxy.prxIP}:${randomProxy.prxPort}`;
         }
-        await this._dispatch(ws, isXudpPath);
+        console.log(`Selected Proxy: ${this.prxIP}`);
+        await this.websocketHandler(ws);
         return;
       }
 
       const regionMatch = path.match(/^\/([A-Z]+)(\d+)?$/i);
       if (regionMatch && REGION_MAP[regionMatch[1].toUpperCase()]) {
         const regionKey = regionMatch[1].toUpperCase();
-        const countries = regionKey === 'GLOBAL' ? [] : REGION_MAP[regionKey];
+        const index = regionMatch[2] ? parseInt(regionMatch[2], 10) - 1 : null;
+        const countries = regionKey === "GLOBAL" ? [] : REGION_MAP[regionKey];
         const proxies = await this.getPrxList(process.env.PRX_BANK_URL);
+
         if (proxies.length === 0) {
           const kvPrx = await this.getKVPrxList();
           let available = [];
-          if (regionKey === 'GLOBAL') available = Object.values(kvPrx).flat();
-          else for (const c of countries) if (kvPrx[c]) available.push(...kvPrx[c]);
-          if (!available.length) { ws.close(1000, `No proxies`); return; }
-          this.prxIP = available[Math.floor(Math.random() * available.length)];
+          if (regionKey === "GLOBAL") { available = Object.values(kvPrx).flat(); }
+          else { for (const c of countries) { if (kvPrx[c]) available.push(...kvPrx[c]); } }
+          if (!available.length) { ws.close(1000, `No proxies for: ${regionKey}`); return; }
+          this.prxIP = index !== null ? (available[index] || available[Math.floor(Math.random() * available.length)]) : available[Math.floor(Math.random() * available.length)];
         } else {
-          const filtered = regionKey === 'GLOBAL' ? proxies : proxies.filter(p => countries.includes(p.country));
-          if (!filtered.length) { ws.close(1000, `No proxies`); return; }
-          const sel = filtered[Math.floor(Math.random() * filtered.length)];
+          const filtered = regionKey === "GLOBAL" ? proxies : proxies.filter(p => countries.includes(p.country));
+          if (!filtered.length) { ws.close(1000, `No proxies for: ${regionKey}`); return; }
+          const sel = index !== null ? (filtered[index] || filtered[Math.floor(Math.random() * filtered.length)]) : filtered[Math.floor(Math.random() * filtered.length)];
           this.prxIP = `${sel.prxIP}:${sel.prxPort}`;
         }
-        await this._dispatch(ws, isXudpPath);
+        console.log(`Selected Proxy: ${this.prxIP}`);
+        await this.websocketHandler(ws);
         return;
       }
 
       const countryMatch = path.match(/^\/([A-Z]{2})(\d+)?$/);
       if (countryMatch) {
         const countryCode = countryMatch[1].toUpperCase();
+        const index = countryMatch[2] ? parseInt(countryMatch[2], 10) - 1 : null;
         const proxies = await this.getPrxList(process.env.PRX_BANK_URL);
+
         if (proxies.length === 0) {
           const kvPrx = await this.getKVPrxList();
-          if (!kvPrx[countryCode] || !kvPrx[countryCode].length) { ws.close(1000, `No proxies`); return; }
-          this.prxIP = kvPrx[countryCode][Math.floor(Math.random() * kvPrx[countryCode].length)];
+          if (!kvPrx[countryCode] || !kvPrx[countryCode].length) { ws.close(1000, `No proxies for: ${countryCode}`); return; }
+          this.prxIP = index !== null ? (kvPrx[countryCode][index] || kvPrx[countryCode][0]) : kvPrx[countryCode][Math.floor(Math.random() * kvPrx[countryCode].length)];
         } else {
           const filtered = proxies.filter(p => p.country === countryCode);
-          if (!filtered.length) { ws.close(1000, `No proxies`); return; }
-          const sel = filtered[Math.floor(Math.random() * filtered.length)];
+          if (!filtered.length) { ws.close(1000, `No proxies for: ${countryCode}`); return; }
+          const sel = index !== null ? (filtered[index] || filtered[0]) : filtered[Math.floor(Math.random() * filtered.length)];
           this.prxIP = `${sel.prxIP}:${sel.prxPort}`;
         }
-        await this._dispatch(ws, isXudpPath);
+        console.log(`Selected Proxy: ${this.prxIP}`);
+        await this.websocketHandler(ws);
         return;
       }
 
       const ipPortMatch = path.match(/^\/(.+[:=-]\d+)$/);
       if (ipPortMatch) {
-        this.prxIP = ipPortMatch[1].replace(/[=:-]/, ':');
-        await this._dispatch(ws, isXudpPath);
+        this.prxIP = ipPortMatch[1].replace(/[=:-]/, ":");
+        console.log(`Direct Proxy: ${this.prxIP}`);
+        await this.websocketHandler(ws);
+        return;
+      }
+
+      if (path.length === 4 || path.includes(',')) {
+        const prxKeys = path.replace("/", "").toUpperCase().split(",");
+        const prxKey = prxKeys[Math.floor(Math.random() * prxKeys.length)];
+        const kvPrx = await this.getKVPrxList();
+        if (kvPrx[prxKey] && kvPrx[prxKey].length > 0) {
+          this.prxIP = kvPrx[prxKey][Math.floor(Math.random() * kvPrx[prxKey].length)];
+          console.log(`Legacy Proxy: ${this.prxIP}`);
+          await this.websocketHandler(ws);
+          return;
+        }
+        ws.close(1000, `No proxies for: ${prxKey}`);
         return;
       }
 
@@ -829,87 +887,11 @@ class GatewayServer {
     }
   }
 
-  async _dispatch(ws, isXudpPath) {
-    if (isXudpPath) {
-      await this.websocketHandlerXudp(ws);
-    } else {
-      await this.websocketHandler(ws);
-    }
-  }
-
-  // ==================== XUDP HANDLER (VLESS + XUDP) ====================
-  async websocketHandlerXudp(ws) {
-    let bridge = null;
-    const log = (m) => console.log(`[XUDP] ${m}`);
-    this.udpStats.wsConnections++;
-
-    ws.on('message', async (message) => {
-      try {
-        const chunk = Buffer.from(message);
-        this.totalRX += chunk.length;
-
-        if (bridge) { bridge.feed(chunk); return; }
-
-        // Baca VLESS header
-        if (chunk.length < 18) throw new Error('short vless header');
-        if (chunk[0] !== 0x00) throw new Error('vless version must be 0');
-
-        const addonLen = chunk[17];
-        let cursor = 18 + addonLen;
-        if (chunk.length < cursor + 4) throw new Error('short vless after addons');
-
-        const cmd = chunk[cursor++];
-        const port = chunk.readUInt16BE(cursor);
-        cursor += 2;
-        const atyp = chunk[cursor++];
-
-        let alen = 0, addr = '';
-        if (atyp === 0x01) { alen = 4; addr = Array.from(chunk.slice(cursor, cursor+4)).join('.'); }
-        else if (atyp === 0x02) { alen = chunk[cursor]; cursor++; addr = chunk.slice(cursor, cursor+alen).toString(); }
-        else if (atyp === 0x03) {
-          alen = 16;
-          const p = [];
-          for (let i = 0; i < 8; i++) p.push(chunk.readUInt16BE(cursor + i*2).toString(16));
-          addr = p.join(':');
-        } else throw new Error('invalid vless atyp');
-
-        cursor += alen;
-
-        if (cmd !== 0x02) throw new Error('XUDP path only handles UDP command');
-        if (!addr || !port) throw new Error('empty target');
-
-        log(`Client connected: ${ws._socket?.remoteAddress || '?'} → ${addr}:${port}`);
-
-        // VLESS response: version=0x00, addon length=0x00
-        const response = Buffer.from([0x00, 0x00]);
-
-        bridge = new XrayXudpBridge(this, ws, response, log);
-
-        const remaining = chunk.slice(cursor);
-        if (remaining.length > 0) bridge.feed(remaining);
-      } catch (err) {
-        console.error('[XUDP] error:', err.message);
-        ws.close(1011, err.message);
-      }
-    });
-
-    ws.on('close', () => {
-      if (bridge) bridge.close();
-      this.udpStats.wsConnections = Math.max(0, this.udpStats.wsConnections - 1);
-      log('WebSocket closed');
-    });
-
-    ws.on('error', (err) => {
-      console.error('[XUDP] ws error:', err);
-      if (bridge) bridge.close();
-    });
-  }
-
-  // ==================== STANDARD WS HANDLER (VLESS/Trojan/VMess/SS + raw UDP) ====================
   async websocketHandler(ws) {
     let addressLog = "", portLog = "";
-    const log = (info) => console.log(`[${addressLog}:${portLog}] ${info}`);
+    const log = (info, event) => console.log(`[${addressLog}:${portLog}] ${info}`, event || "");
     let remoteSocketWrapper = { value: null };
+
     this.udpStats.wsConnections++;
 
     ws.on('message', async (message) => {
@@ -923,7 +905,6 @@ class GatewayServer {
 
         if (protocol === horse) protocolHeader = this.readHorseHeader(chunk);
         else if (protocol === flash) protocolHeader = this.readFlashHeader(chunk);
-        else if (protocol === vless) protocolHeader = this.readVlessHeader(chunk);
         else if (protocol === "ss") protocolHeader = this.readSsHeader(chunk);
         else throw new Error("Unknown Protocol!");
 
@@ -957,54 +938,138 @@ class GatewayServer {
 
   // ==================== PROTOCOL SNIFFERS ====================
   async protocolSniffer(buffer) {
-    // Trojan
     if (buffer.length >= 62) {
       const d = buffer.slice(56, 60);
       if (d[0] === 0x0d && d[1] === 0x0a && [0x01,0x03,0x7f].includes(d[2]) && [0x01,0x03,0x04].includes(d[3])) return horse;
     }
-    // VLESS: version 0x00
-    if (buffer.length >= 18 && buffer[0] === 0x00 && buffer[17] <= 64) return vless;
-    // VMess: version 0x01
-    if (buffer.length >= 17 && buffer[0] === 0x01) {
-      const h = buffer.slice(1, 17).toString('hex');
-      if (h.match(/^[0-9a-f]{8}[0-9a-f]{4}4[0-9a-f]{3}[89ab][0-9a-f]{3}[0-9a-f]{12}$/i)) return flash;
-    }
+    const h = buffer.slice(1, 17).toString('hex');
+    if (h.match(/^[0-9a-f]{8}[0-9a-f]{4}4[0-9a-f]{3}[89ab][0-9a-f]{3}[0-9a-f]{12}$/i)) return flash;
     return "ss";
   }
 
-  readVlessHeader(buf) {
+  async handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawClientData, webSocket, responseHeader, log) {
+    const connectAndWrite = (address, port) => new Promise((resolve, reject) => {
+      const s = net.createConnection({ host: address, port }, () => {
+        log(`connected to ${address}:${port}`);
+        s.write(rawClientData);
+        resolve(s);
+      });
+      s.on('error', reject);
+    });
+    const retry = async () => {
+      try {
+        const parts = (this.prxIP || '').split(/[:=-]/);
+        const s = await connectAndWrite(parts[0] || addressRemote, parts[1] || portRemote);
+        remoteSocket.value = s;
+        s.on('close', () => webSocket.close());
+        s.on('error', () => webSocket.close());
+        this.remoteSocketToWS(s, webSocket, responseHeader, null, log);
+      } catch (e) { webSocket.close(); }
+    };
     try {
-      if (buf.length < 18) return { hasError: true, message: 'short vless' };
-      if (buf[0] !== 0x00) return { hasError: true, message: 'bad vless version' };
-      const addonLen = buf[17];
-      let cursor = 18 + addonLen;
-      if (buf.length < cursor + 4) return { hasError: true, message: 'short vless body' };
-      const cmd = buf[cursor++];
-      const port = buf.readUInt16BE(cursor);
-      cursor += 2;
-      const atyp = buf[cursor++];
-      let alen = 0, addr = '';
-      if (atyp === 0x01) { alen = 4; addr = Array.from(buf.slice(cursor, cursor+4)).join('.'); }
-      else if (atyp === 0x02) { alen = buf[cursor]; cursor++; addr = buf.slice(cursor, cursor+alen).toString(); }
-      else if (atyp === 0x03) {
-        alen = 16;
-        const p = [];
-        for (let i = 0; i < 8; i++) p.push(buf.readUInt16BE(cursor + i*2).toString(16));
-        addr = p.join(':');
-      } else return { hasError: true, message: `bad vless atyp ${atyp}` };
-      cursor += alen;
-      const isUDP = cmd === 0x02;
-      return {
-        hasError: false,
-        addressRemote: addr,
-        portRemote: port,
-        rawDataIndex: cursor,
-        rawClientData: buf.slice(cursor),
-        version: Buffer.from([0x00, 0x00]),
-        isUDP
+      const s = await connectAndWrite(addressRemote, portRemote);
+      remoteSocket.value = s;
+      s.on('close', () => webSocket.close());
+      s.on('error', () => webSocket.close());
+      this.remoteSocketToWS(s, webSocket, responseHeader, retry, log);
+    } catch (e) { await retry(); }
+  }
+
+  async handleUDPOutbound(targetAddress, targetPort, dataChunk, webSocket, responseHeader, log) {
+    try {
+      this.udpStats.lastTarget = `${targetAddress}:${targetPort}`;
+      this.udpStats.lastActivity = new Date().toISOString();
+
+      let header = responseHeader;
+      let resolvedAddress = targetAddress;
+      let family = 4;
+
+      if (net.isIPv4(targetAddress)) { resolvedAddress = targetAddress; family = 4; }
+      else if (net.isIPv6(targetAddress)) { resolvedAddress = targetAddress; family = 6; }
+      else {
+        try {
+          const rec = await dns.lookup(targetAddress, { family: 4 });
+          resolvedAddress = rec.address; family = 4;
+          log(`DNS ${targetAddress} -> ${resolvedAddress}`);
+        } catch (e) {
+          try {
+            const rec6 = await dns.lookup(targetAddress, { family: 6 });
+            resolvedAddress = rec6.address; family = 6;
+            log(`DNS ${targetAddress} -> ${resolvedAddress} (IPv6)`);
+          } catch (e2) {
+            this.udpStats.lastError = `DNS FAIL ${targetAddress}: ${e2.message}`;
+            log(this.udpStats.lastError);
+            return;
+          }
+        }
+      }
+
+      const key = `${targetAddress}:${targetPort}:${Date.now()}`;
+      const sock = dgram.createSocket(family === 6 ? 'udp6' : 'udp4');
+      this.activeUDPConnections.set(key, { socket: sock, webSocket });
+      this.udpStats.activeUdpSockets = this.activeUDPConnections.size;
+
+      const cleanup = () => {
+        try { sock.close(); } catch(_) {}
+        this.activeUDPConnections.delete(key);
+        this.udpStats.activeUdpSockets = this.activeUDPConnections.size;
       };
+
+      sock.on('error', (e) => {
+        this.udpStats.lastError = `SOCK ${e.message}`;
+        log(`UDP socket error: ${e.message}`);
+        cleanup();
+      });
+
+      sock.send(dataChunk, targetPort, resolvedAddress, (e) => {
+        if (e) {
+          this.udpStats.lastError = `SEND ${e.message}`;
+          log(`UDP send error -> ${e.message}`);
+          cleanup();
+        } else {
+          this.udpStats.outPackets++;
+          this.udpStats.outBytes += dataChunk.length;
+          log(`UDP sent ${dataChunk.length}B to ${resolvedAddress}:${targetPort}`);
+        }
+      });
+
+      sock.on('message', (msg, rinfo) => {
+        this.udpStats.inPackets++;
+        this.udpStats.inBytes += msg.length;
+        this.udpStats.lastActivity = new Date().toISOString();
+        this.totalRX += msg.length;
+        log(`UDP got ${msg.length}B from ${rinfo.address}:${rinfo.port}`);
+        if (webSocket.readyState === WebSocket.OPEN) {
+          if (header) {
+            const buf = Buffer.from(header);
+            this.totalTX += buf.length;
+            webSocket.send(Buffer.concat([buf, msg]));
+            header = null;
+          } else {
+            webSocket.send(msg);
+          }
+        }
+      });
+
+      sock.on('close', () => {
+        this.activeUDPConnections.delete(key);
+        this.udpStats.activeUdpSockets = this.activeUDPConnections.size;
+      });
+
+      let t = setTimeout(cleanup, 30000);
+      sock.on('message', () => {
+        clearTimeout(t);
+        t = setTimeout(cleanup, 30000);
+      });
     } catch (e) {
-      return { hasError: true, message: e.message };
+      this.udpStats.lastError = e.message;
+      console.error(`UDP error: ${e.message}`);
+    }
+  }
+
+  cleanupUDPConnections(webSocket) {
+    for (const [key, conn] of this.activeUDPConnections) {
+      if (conn.webSocket === webSocket) { try { conn.socket.close(); } catch(_) {} this.activeUDPConnections.delete(key); }
     }
   }
 
@@ -1051,102 +1116,6 @@ class GatewayServer {
     return { hasError: false, addressRemote: av, portRemote: pr, rawDataIndex: pi+4, rawClientData: db.slice(pi+4), version: null, isUDP: udp };
   }
 
-  // ==================== TCP + RAW UDP ====================
-  async handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawClientData, webSocket, responseHeader, log) {
-    const connectAndWrite = (address, port) => new Promise((resolve, reject) => {
-      const s = net.createConnection({ host: address, port }, () => {
-        log(`connected to ${address}:${port}`);
-        if (responseHeader) s.write(Buffer.from(responseHeader));
-        s.write(rawClientData);
-        resolve(s);
-      });
-      s.on('error', reject);
-    });
-    const retry = async () => {
-      try {
-        const parts = (this.prxIP || '').split(/[:=-]/);
-        const s = await connectAndWrite(parts[0] || addressRemote, parts[1] || portRemote);
-        remoteSocket.value = s;
-        s.on('close', () => webSocket.close());
-        s.on('error', () => webSocket.close());
-        this.remoteSocketToWS(s, webSocket, null, null, log);
-      } catch { webSocket.close(); }
-    };
-    try {
-      const s = await connectAndWrite(addressRemote, portRemote);
-      remoteSocket.value = s;
-      s.on('close', () => webSocket.close());
-      s.on('error', () => webSocket.close());
-      this.remoteSocketToWS(s, webSocket, null, retry, log);
-    } catch { await retry(); }
-  }
-
-  async handleUDPOutbound(targetAddress, targetPort, dataChunk, webSocket, responseHeader, log) {
-    try {
-      this.udpStats.lastTarget = `${targetAddress}:${targetPort}`;
-      this.udpStats.lastActivity = new Date().toISOString();
-
-      let header = responseHeader;
-      let resolvedAddress = targetAddress;
-      let family = 4;
-
-      if (net.isIPv4(targetAddress)) { resolvedAddress = targetAddress; family = 4; }
-      else if (net.isIPv6(targetAddress)) { resolvedAddress = targetAddress; family = 6; }
-      else {
-        try {
-          const rec = await dns.lookup(targetAddress, { family: 4 });
-          resolvedAddress = rec.address; family = 4;
-        } catch (e) {
-          try {
-            const rec6 = await dns.lookup(targetAddress, { family: 6 });
-            resolvedAddress = rec6.address; family = 6;
-          } catch (e2) {
-            this.udpStats.lastError = `DNS FAIL ${targetAddress}`;
-            return;
-          }
-        }
-      }
-
-      const key = `${targetAddress}:${targetPort}:${Date.now()}`;
-      const sock = dgram.createSocket(family === 6 ? 'udp6' : 'udp4');
-      this.activeUDPConnections.set(key, { socket: sock, webSocket });
-      this.udpStats.activeUdpSockets = this.activeUDPConnections.size;
-
-      const cleanup = () => {
-        try { sock.close(); } catch(_) {}
-        this.activeUDPConnections.delete(key);
-        this.udpStats.activeUdpSockets = this.activeUDPConnections.size;
-      };
-
-      sock.on('error', (e) => { this.udpStats.lastError = `SOCK ${e.message}`; cleanup(); });
-      sock.send(dataChunk, targetPort, resolvedAddress, (e) => {
-        if (e) { this.udpStats.lastError = `SEND ${e.message}`; cleanup(); }
-        else { this.udpStats.outPackets++; this.udpStats.outBytes += dataChunk.length; }
-      });
-      sock.on('message', (msg, rinfo) => {
-        this.udpStats.inPackets++; this.udpStats.inBytes += msg.length;
-        this.totalRX += msg.length;
-        if (webSocket.readyState === WebSocket.OPEN) {
-          if (header) {
-            const buf = Buffer.from(header);
-            webSocket.send(Buffer.concat([buf, msg]));
-            header = null;
-          } else webSocket.send(msg);
-        }
-      });
-      sock.on('close', () => { this.activeUDPConnections.delete(key); this.udpStats.activeUdpSockets = this.activeUDPConnections.size; });
-
-      let t = setTimeout(cleanup, 30000);
-      sock.on('message', () => { clearTimeout(t); t = setTimeout(cleanup, 30000); });
-    } catch (e) { this.udpStats.lastError = e.message; }
-  }
-
-  cleanupUDPConnections(webSocket) {
-    for (const [key, conn] of this.activeUDPConnections) {
-      if (conn.webSocket === webSocket) { try { conn.socket.close(); } catch(_) {} this.activeUDPConnections.delete(key); }
-    }
-  }
-
   remoteSocketToWS(remoteSocket, webSocket, responseHeader, retry, log) {
     let header = responseHeader, hasData = false;
     remoteSocket.on('data', (chunk) => {
@@ -1155,6 +1124,7 @@ class GatewayServer {
       if (webSocket.readyState !== WebSocket.OPEN) { remoteSocket.destroy(); return; }
       if (header) {
         const buf = Buffer.from(header);
+        this.totalTX += buf.length;
         webSocket.send(Buffer.concat([buf, chunk]));
         header = null;
       } else webSocket.send(chunk);
@@ -1163,12 +1133,13 @@ class GatewayServer {
     remoteSocket.on('error', (e) => console.error(`Socket error:`, e));
   }
 
-  // ==================== START ====================
+  // ==================== START SERVER ====================
   start(port = process.env.PORT || 3000) {
     const server = http.createServer((req, res) => {
       this.handleHttpRequest(req, res).catch(error => {
         console.error('HTTP handler error:', error);
-        res.writeHead(500); res.end('Internal Server Error');
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('Internal Server Error');
       });
     });
 
@@ -1194,32 +1165,39 @@ class GatewayServer {
 
     const gracefulShutdown = () => {
       console.log('Shutting down...');
-      if (this.wss) { this.wss.clients.forEach(c => c.close()); this.wss.close(); }
-      for (const [, conn] of this.activeUDPConnections) { try { conn.socket.close(); } catch(_) {} }
+      if (this.wss) { this.wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.close(); }); this.wss.close(); }
+      for (const [key, conn] of this.activeUDPConnections) { try { conn.socket.close(); } catch(_) {} }
       this.activeUDPConnections.clear();
       if (this._relayHandler) this._relayHandler.close();
-      if (this.httpServer) this.httpServer.close(() => process.exit(0));
+      if (this.httpServer) { this.httpServer.close(() => { console.log('Server closed'); process.exit(0); }); }
       setTimeout(() => process.exit(1), 10000);
     };
+
     process.on('SIGTERM', gracefulShutdown);
     process.on('SIGINT', gracefulShutdown);
 
     server.listen(port, '0.0.0.0', () => {
-      console.log(`✅ Gateway running on port ${port}`);
-      console.log(`🛰️  /xudp = VLESS+XUDP native`);
-      console.log(`🛰️  /ALL, /ID, dll = raw UDP/TCP`);
+      console.log(`✅ Railway Gateway running on port ${port}`);
+      console.log(`🌐 http://localhost:${port}`);
+      console.log(`🔌 ws://localhost:${port}`);
+      console.log(`🛰️  /xudp = alias /ALL (raw UDP-over-TCP)`);
     });
 
     this.httpServer = server;
+
     server.on('error', (error) => {
       console.error('Server error:', error);
-      if (error.code === 'EADDRINUSE') process.exit(1);
+      if (error.code === 'EADDRINUSE') { console.error(`Port ${port} in use`); process.exit(1); }
     });
   }
 }
 
-// ==================== VLRLY004 RELAY ====================
+// =====================================================================
+// =============== EMBEDDED VLRLY004 WEBSOCKET RELAY ===================
+// =====================================================================
+
 const RELAY_WS_PATH = process.env.RELAY_WS_PATH || '/xudp-native';
+
 const RELAY_CFG = Object.freeze({
     WS_PATH: RELAY_WS_PATH,
     MAX_WS_MESSAGE_BYTES: 4 * 1024 * 1024,
@@ -1229,7 +1207,12 @@ const RELAY_CFG = Object.freeze({
     MAX_CONNECTIONS: 4096,
     REJECT_UDP_443: false,
 });
-const STATS = { startTime: Date.now(), activeClients: 0, totalHandshakes: 0, udpPacketsOut: 0, udpBytesOut: 0, udpPacketsIn: 0, udpBytesIn: 0, recentLogs: [] };
+
+const STATS = {
+    startTime: Date.now(), activeClients: 0, totalHandshakes: 0,
+    udpPacketsOut: 0, udpBytesOut: 0, udpPacketsIn: 0, udpBytesIn: 0,
+    recentLogs: [],
+};
 
 function addLog(msg) {
     const time = new Date().toLocaleTimeString('id-ID');
