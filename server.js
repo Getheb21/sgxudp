@@ -1,5 +1,5 @@
 // ============================================
-// RAILWAY GATEWAY - FULL COMPLETE + EMBEDDED UDP RELAY
+// RAILWAY GATEWAY - FULL COMPLETE + EMBEDDED UDP RELAY + XUDP
 // UI Cyberpunk + VLESS/Trojan Generator + WebSocket + UDP + XUDP
 // Ready to Deploy - Node.js
 // Domain AUTO DETECT via JavaScript (browser-side)
@@ -316,11 +316,28 @@ class GatewayServer {
           </div>
 
           <div>
+            <label class="text-xs text-slate-400 font-medium mb-1.5 block">
+              <i class="fa-solid fa-satellite-dish text-emerald-400 mr-1"></i> Network Mode
+            </label>
+            <div class="flex gap-2">
+              <label class="flex-1 flex items-center gap-2 bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 cursor-pointer hover:border-blue-500/50 transition">
+                <input type="radio" name="netMode" value="tcp" checked class="accent-blue-500">
+                <span class="text-xs text-slate-300">TCP Only</span>
+              </label>
+              <label class="flex-1 flex items-center gap-2 bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 cursor-pointer hover:border-emerald-500/50 transition">
+                <input type="radio" name="netMode" value="xudp" class="accent-emerald-500">
+                <span class="text-xs text-slate-300">XUDP (UDP over WS)</span>
+              </label>
+            </div>
+          </div>
+
+          <div>
             <label class="text-xs text-slate-400 font-medium mb-1.5 block">Path</label>
             <div class="flex gap-2">
               <select id="pathSelect" 
                       class="bg-[#10121d] border border-slate-800 rounded-lg px-3 py-2 text-sm text-white font-mono focus:border-blue-500 focus:outline-none transition">
                 <option value="/ALL">🌍 /ALL (Rotate Global)</option>
+                <option value="/xudp">🛰️ /xudp (UDP Relay)</option>
                 <option value="/ID">🇮🇩 /ID (Indonesia)</option>
                 <option value="/SG">🇸🇬 /SG (Singapore)</option>
                 <option value="/JP">🇯🇵 /JP (Japan)</option>
@@ -416,6 +433,16 @@ class GatewayServer {
           <h2 class="text-md font-bold tracking-wide text-white">WEBSOCKET ROUTING ENDPOINTS</h2>
         </div>
         <div class="space-y-3 max-h-[420px] overflow-y-auto pr-1">
+
+          <div class="bg-[#10121d] border border-slate-900/60 p-4 rounded-lg flex flex-col md:flex-row justify-between items-start md:items-center gap-3 hover:bg-[#121524] transition">
+            <div>
+              <span class="text-xs bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded font-bold border border-emerald-500/20">UDP / XUDP RELAY</span>
+              <p class="text-sm font-semibold text-slate-200 mt-2"><span class="ws-domain">${protocolWs}</span>://<span class="ws-host">${currentHost}</span>/xudp</p>
+            </div>
+            <button onclick="copyDynamic('xudp')" class="text-xs bg-[#171a29] border border-slate-800 text-slate-400 hover:text-white hover:border-emerald-500 px-3 py-1.5 rounded transition flex items-center gap-1.5 active:scale-95">
+              <i class="fa-regular fa-copy"></i> COPY
+            </button>
+          </div>
           
           <div class="bg-[#10121d] border border-slate-900/60 p-4 rounded-lg flex flex-col md:flex-row justify-between items-start md:items-center gap-3 hover:bg-[#121524] transition">
             <div>
@@ -459,10 +486,10 @@ class GatewayServer {
 
           <div class="bg-[#10121d] border border-slate-900/60 p-4 rounded-lg flex flex-col md:flex-row justify-between items-start md:items-center gap-3 hover:bg-[#121524] transition">
             <div>
-              <span class="text-xs bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded font-bold border border-emerald-500/20">UDP / XUDP RELAY</span>
-              <p class="text-sm font-semibold text-slate-200 mt-2"><span class="ws-domain">${protocolWs}</span>://<span class="ws-host">${currentHost}</span>/xudp</p>
+              <span class="text-xs bg-cyan-500/10 text-cyan-400 px-2 py-0.5 rounded font-bold border border-cyan-500/20">VLRLY004 (CF WORKER)</span>
+              <p class="text-sm font-semibold text-slate-200 mt-2"><span class="ws-domain">${protocolWs}</span>://<span class="ws-host">${currentHost}</span>/xudp-native</p>
             </div>
-            <button onclick="copyDynamic('xudp')" class="text-xs bg-[#171a29] border border-slate-800 text-slate-400 hover:text-white hover:border-blue-500 px-3 py-1.5 rounded transition flex items-center gap-1.5 active:scale-95">
+            <button onclick="copyDynamic('xudp-native')" class="text-xs bg-[#171a29] border border-slate-800 text-slate-400 hover:text-white hover:border-cyan-500 px-3 py-1.5 rounded transition flex items-center gap-1.5 active:scale-95">
               <i class="fa-regular fa-copy"></i> COPY
             </button>
           </div>
@@ -580,31 +607,25 @@ class GatewayServer {
     
     // Update semua span domain di halaman
     function updateAllDomains() {
-      // Update host input di generator
       const hostInput = document.getElementById('hostInput');
       if (hostInput && currentDomain !== hostInput.value) {
         hostInput.value = currentDomain;
       }
       
-      // Update badge
       const badge = document.getElementById('current-domain-badge');
       if (badge) badge.innerHTML = '🌐 ' + currentDomain;
       
-      // Update semua span domain
       document.querySelectorAll('.ws-domain').forEach(el => el.textContent = wsProtocol);
       document.querySelectorAll('.ws-host').forEach(el => el.textContent = currentDomain);
       document.querySelectorAll('.http-domain').forEach(el => el.textContent = httpProtocol);
       document.querySelectorAll('.http-host').forEach(el => el.textContent = currentDomain);
       
-      // Update curl examples
       document.querySelectorAll('.curl-example-1').forEach(el => el.textContent = 'curl ' + httpProtocol + '://' + currentDomain + '/api/proxies');
       document.querySelectorAll('.wscat-example').forEach(el => el.textContent = 'wscat -c ' + wsProtocol + '://' + currentDomain + '/ID');
     }
     
-    // Jalankan saat halaman dimuat
     updateAllDomains();
     
-    // Helper functions buat copy
     function getCurrentDomain() { return currentDomain; }
     function getWsProtocol() { return wsProtocol; }
     function getHttpProtocol() { return httpProtocol; }
@@ -688,16 +709,21 @@ class GatewayServer {
         const uuid = document.getElementById('uuidInput').value.trim() || '853b8456-0c0b-4bfa-b3b4-b2619248a9bc';
         const host = document.getElementById('hostInput').value.trim() || currentDomain;
         const port = document.getElementById('portInput').value.trim() || '443';
-        const path = document.getElementById('pathInput').value.trim() || '/ALL';
+        let path = document.getElementById('pathInput').value.trim() || '/ALL';
+        const netModeEl = document.querySelector('input[name="netMode"]:checked');
+        const netMode = netModeEl ? netModeEl.value : 'tcp';
+        const isXudp = netMode === 'xudp';
+        if (isXudp && (path === '/ALL' || path === '')) path = '/xudp';
         const sni = document.getElementById('sniInput').value.trim() || 'business.whatsapp.com';
         const remark = document.getElementById('remarkInput').value.trim() || 'KOPI KAPAL';
         const encodedPath = encodeURIComponent(path);
         const encodedRemark = encodeURIComponent(remark);
 
-        const vlessUrl = 'vless://' + uuid + '@' + host + ':' + port +
-                         '?encryption=none&security=tls&sni=' + sni +
+        let vlessQuery = 'encryption=none&security=tls&sni=' + sni +
                          '&fp=randomized&type=ws&host=' + host +
-                         '&path=' + encodedPath + '#' + encodedRemark;
+                         '&path=' + encodedPath;
+        if (isXudp) vlessQuery += '&packetEncoding=xudp';
+        const vlessUrl = 'vless://' + uuid + '@' + host + ':' + port + '?' + vlessQuery + '#' + encodedRemark;
 
         const trojanPass = generateTrojanPass();
         const trojanUrl = 'trojan://' + trojanPass + '@' + host + ':' + port +
@@ -717,6 +743,7 @@ class GatewayServer {
           '  network: ws\\n' +
           '  tls: true\\n' +
           '  udp: true\\n' +
+          (isXudp ? '  packet-encoding: xudp\\n' : '') +
           '  sni: "' + sni + '"\\n' +
           '  client-fingerprint: randomized\\n' +
           '  ws-opts:\\n' +
@@ -744,6 +771,9 @@ class GatewayServer {
       ['uuidInput','hostInput','portInput','pathInput','sniInput','remarkInput'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.addEventListener('input', generateAccounts);
+      });
+      document.querySelectorAll('input[name="netMode"]').forEach(el => {
+        el.addEventListener('change', generateAccounts);
       });
       const pathSelect = document.getElementById('pathSelect');
       if (pathSelect) pathSelect.addEventListener('change', function() {
@@ -869,7 +899,10 @@ class GatewayServer {
   async handleWebSocketConnection(ws, request) {
     try {
       const parsedUrl = url.parse(request.url, true);
-      const path = parsedUrl.pathname;
+      let path = parsedUrl.pathname;
+      // /xudp = alias /ALL untuk client v2ray yang pakai UDP-over-WS.
+      // (protocol VLRLY004 custom tetap di path RELAY_WS_PATH)
+      if (path === '/xudp' || path === '/XUDP') path = '/ALL';
       console.log(`WebSocket request path: ${path}`);
 
       const proxyListMatch = path.match(/^\/PROXYLIST\/([A-Z]{2}(,[A-Z]{2})*)$/i);
@@ -1215,7 +1248,7 @@ class GatewayServer {
       this.handleWebSocketConnection(ws, req);
     });
 
-    // ==== Routing upgrade: /xudp → relay UDP, sisanya → gateway ====
+    // ==== Routing upgrade: /xudp-native → custom relay VLRLY004, sisanya → gateway ====
     const relayHandler = createRelayUpgradeHandler();
     this._relayHandler = relayHandler;
 
@@ -1264,11 +1297,11 @@ class GatewayServer {
 // =============== EMBEDDED UDP / XUDP WEBSOCKET RELAY =================
 // =====================================================================
 // Diambil dari index.js — dijalankan di HTTP server yang sama dengan
-// gateway. Aktif hanya pada path RELAY_WS_PATH (default "/xudp").
+// gateway. Aktif hanya pada path RELAY_WS_PATH (default "/xudp-native").
 // Client TCP Trojan/VMess/SS di path lain tetap utuh.
 // =====================================================================
 
-const RELAY_WS_PATH = process.env.RELAY_WS_PATH || '/xudp';
+const RELAY_WS_PATH = process.env.RELAY_WS_PATH || '/xudp-native';
 
 const RELAY_CFG = Object.freeze({
     WS_PATH: RELAY_WS_PATH,
